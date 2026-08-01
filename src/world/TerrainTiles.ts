@@ -1,0 +1,334 @@
+import {
+  BufferAttribute,
+  BufferGeometry,
+  Group,
+  Mesh,
+  type Material,
+  Vector3,
+} from 'three';
+import { blendedGrassColor, SEA_LEVEL } from './Biome';
+import { TerrainField } from './TerrainField';
+import { clamp01, smoothstep } from '../core/MathUtils';
+import type { ProjectionResult } from './TerrainField';
+
+/**
+ * Level-of-detail terrain tiles.
+ *
+ * Concentric rings of square tiles follow the camera: a fine 4 m grid close in,
+ * coarsening by powers of two out to the fog limit. Every tile samples the same
+ * `TerrainField`, so tiles of different resolutions meet without a visible
+ * step; a downward skirt around each tile hides the remaining LOD cracks.
+ */
+
+interface TileLevel {
+  size: number;
+  segments: number;
+  /** Half-extent in tiles: a (2r+1) x (2r+1) block around the camera. */
+  radius: number;
+}
+
+const LEVELS: TileLevel[] = [
+  { size: 128, segments: 32, radius: 3 },
+  { size: 256, segments: 32, radius: 3 },
+  { size: 512, segments: 24, radius: 3 },
+  { size: 1024, segments: 16, radius: 3 },
+  { size: 2048, segments: 12, radius: 3 },
+];
+
+interface Tile {
+  key: string;
+  level: number;
+  ix: number;
+  iz: number;
+  mesh: Mesh;
+  /** Distance from the camera when last evaluated, for build prioritisation. */
+  priority: number;
+}
+
+export class TerrainTiles {
+  readonly group = new Group();
+  private readonly tiles = new Map<string, Tile>();
+  private readonly pending: { key: string; level: number; ix: number; iz: number; priority: number }[] = [];
+  private readonly projection: ProjectionResult = { s: 0, lateral: 0, hint: -1 };
+
+  /** Number of levels actually used, reduced on lower quality settings. */
+  levelCount = LEVELS.length;
+
+  constructor(
+    private readonly field: TerrainField,
+    private readonly material: Material,
+  ) {
+    this.group.name = 'terrain-tiles';
+    this.group.matrixAutoUpdate = false;
+  }
+
+  setViewDistance(distance: number): void {
+    let count = 1;
+    for (let i = 0; i < LEVELS.length; i++) {
+      const reach = LEVELS[i].size * (LEVELS[i].radius + 0.5);
+      count = i + 1;
+      if (reach > distance) break;
+    }
+    this.levelCount = count;
+  }
+
+  /** Recomputes which tiles should exist and queues any that are missing. */
+  refresh(cameraX: number, cameraZ: number): void {
+    const wanted = new Set<string>();
+    let innerMinX = Infinity;
+    let innerMaxX = -Infinity;
+    let innerMinZ = Infinity;
+    let innerMaxZ = -Infinity;
+
+    for (let level = 0; level < this.levelCount; level++) {
+      const { size, radius } = LEVELS[level];
+      const cx = Math.floor(cameraX / size);
+      const cz = Math.floor(cameraZ / size);
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minZ = Infinity;
+      let maxZ = -Infinity;
+
+      for (let dz = -radius; dz <= radius; dz++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const ix = cx + dx;
+          const iz = cz + dz;
+          const x0 = ix * size;
+          const z0 = iz * size;
+          const x1 = x0 + size;
+          const z1 = z0 + size;
+          minX = Math.min(minX, x0);
+          maxX = Math.max(maxX, x1);
+          minZ = Math.min(minZ, z0);
+          maxZ = Math.max(maxZ, z1);
+
+          // Skip tiles already covered in full by the finer level inside.
+          if (level > 0 && x0 >= innerMinX && x1 <= innerMaxX && z0 >= innerMinZ && z1 <= innerMaxZ) {
+            continue;
+          }
+
+          const key = `${level}:${ix}:${iz}`;
+          wanted.add(key);
+          if (!this.tiles.has(key) && !this.pending.some((p) => p.key === key)) {
+            const centreX = x0 + size * 0.5;
+            const centreZ = z0 + size * 0.5;
+            const priority = Math.hypot(centreX - cameraX, centreZ - cameraZ);
+            this.pending.push({ key, level, ix, iz, priority });
+          }
+        }
+      }
+      innerMinX = minX;
+      innerMaxX = maxX;
+      innerMinZ = minZ;
+      innerMaxZ = maxZ;
+    }
+
+    // Retire tiles that dropped out of range.
+    for (const [key, tile] of this.tiles) {
+      if (!wanted.has(key)) {
+        this.group.remove(tile.mesh);
+        tile.mesh.geometry.dispose();
+        this.tiles.delete(key);
+      }
+    }
+
+    for (let i = this.pending.length - 1; i >= 0; i--) {
+      if (!wanted.has(this.pending[i].key)) this.pending.splice(i, 1);
+    }
+    this.pending.sort((a, b) => b.priority - a.priority); // build nearest last-in/first-out
+  }
+
+  /** Builds queued tiles until the time budget for this frame is used up. */
+  processQueue(budgetMs: number): number {
+    const deadline = performance.now() + budgetMs;
+    let built = 0;
+    while (this.pending.length > 0 && performance.now() < deadline) {
+      const job = this.pending.pop()!;
+      if (this.tiles.has(job.key)) continue;
+      const mesh = this.buildTile(job.level, job.ix, job.iz);
+      this.group.add(mesh);
+      this.tiles.set(job.key, { ...job, mesh });
+      built++;
+    }
+    return built;
+  }
+
+  get pendingCount(): number {
+    return this.pending.length;
+  }
+
+  get tileCount(): number {
+    return this.tiles.size;
+  }
+
+  private buildTile(level: number, ix: number, iz: number): Mesh {
+    const { size, segments } = LEVELS[level];
+    const step = size / segments;
+    const originX = ix * size;
+    const originZ = iz * size;
+
+    // Sample one extra ring of heights so normals at the tile border are
+    // computed from real neighbours rather than from a clamped edge.
+    const n = segments + 3;
+    const heights = new Float32Array(n * n);
+    const shore = new Float32Array(n * n);
+    const colors = new Float32Array(n * n * 3);
+    this.projection.hint = -1;
+
+    for (let j = 0; j < n; j++) {
+      const z = originZ + (j - 1) * step;
+      for (let i = 0; i < n; i++) {
+        const x = originX + (i - 1) * step;
+        const proj = this.field.project(x, z, this.projection.hint, this.projection);
+        const sample = this.field.sampleAt(proj.s);
+        const y = this.field.ground(sample, proj.lateral, x, z, true);
+        const idx = j * n + i;
+        heights[idx] = y;
+        shore[idx] = clamp01(
+          (1 - smoothstep(0.4, 3.4, y - SEA_LEVEL)) * smoothstep(-2.5, 0.4, y - SEA_LEVEL) * 1.15 +
+            (y < SEA_LEVEL ? 0.85 : 0),
+        );
+        const col = blendedGrassColor(sample.weights);
+        // Large-scale colour variation so fields do not read as a flat wash.
+        const tint = 0.78 + this.field.noise.patches.fbm(x * 0.0016, z * 0.0016, 3) * 0.5;
+        colors[idx * 3] = col.r * tint;
+        colors[idx * 3 + 1] = col.g * tint;
+        colors[idx * 3 + 2] = col.b * tint;
+      }
+    }
+
+    const gridVerts = (segments + 1) * (segments + 1);
+    const skirtVerts = (segments + 1) * 4;
+    const total = gridVerts + skirtVerts;
+
+    const positions = new Float32Array(total * 3);
+    const normals = new Float32Array(total * 3);
+    const uvs = new Float32Array(total * 2);
+    const vcolors = new Float32Array(total * 3);
+    const slopes = new Float32Array(total);
+    const shores = new Float32Array(total);
+
+    const normal = new Vector3();
+    const at = (i: number, j: number) => heights[(j + 1) * n + (i + 1)];
+
+    for (let j = 0; j <= segments; j++) {
+      for (let i = 0; i <= segments; i++) {
+        const vi = j * (segments + 1) + i;
+        const x = i * step;
+        const z = j * step;
+        const y = at(i, j);
+        positions[vi * 3] = x;
+        positions[vi * 3 + 1] = y;
+        positions[vi * 3 + 2] = z;
+
+        const dx = at(i + 1, j) - at(i - 1, j);
+        const dz = at(i, j + 1) - at(i, j - 1);
+        normal.set(-dx, 2 * step, -dz).normalize();
+        normals[vi * 3] = normal.x;
+        normals[vi * 3 + 1] = normal.y;
+        normals[vi * 3 + 2] = normal.z;
+
+        uvs[vi * 2] = (originX + x) * 0.06;
+        uvs[vi * 2 + 1] = (originZ + z) * 0.06;
+
+        const idx = (j + 1) * n + (i + 1);
+        vcolors[vi * 3] = colors[idx * 3];
+        vcolors[vi * 3 + 1] = colors[idx * 3 + 1];
+        vcolors[vi * 3 + 2] = colors[idx * 3 + 2];
+        slopes[vi] = clamp01(1 - normal.y);
+        shores[vi] = shore[idx];
+      }
+    }
+
+    const indices: number[] = [];
+    for (let j = 0; j < segments; j++) {
+      for (let i = 0; i < segments; i++) {
+        const a = j * (segments + 1) + i;
+        const b = a + 1;
+        const c = a + segments + 1;
+        const d = c + 1;
+        indices.push(a, c, b, b, c, d);
+      }
+    }
+
+    // Skirt: duplicate the border ring, dropped by a couple of cells, so
+    // neighbouring tiles of a coarser level cannot show a gap.
+    const drop = step * 2.2 + 1.5;
+    let sv = gridVerts;
+    const addSkirt = (i: number, j: number): number => {
+      const src = j * (segments + 1) + i;
+      const v = sv++;
+      positions[v * 3] = positions[src * 3];
+      positions[v * 3 + 1] = positions[src * 3 + 1] - drop;
+      positions[v * 3 + 2] = positions[src * 3 + 2];
+      normals[v * 3] = normals[src * 3];
+      normals[v * 3 + 1] = normals[src * 3 + 1];
+      normals[v * 3 + 2] = normals[src * 3 + 2];
+      uvs[v * 2] = uvs[src * 2];
+      uvs[v * 2 + 1] = uvs[src * 2 + 1];
+      vcolors[v * 3] = vcolors[src * 3];
+      vcolors[v * 3 + 1] = vcolors[src * 3 + 1];
+      vcolors[v * 3 + 2] = vcolors[src * 3 + 2];
+      slopes[v] = slopes[src];
+      shores[v] = shores[src];
+      return v;
+    };
+
+    for (let i = 0; i < segments; i++) {
+      const a = i * 1 + 0 * (segments + 1);
+      const b = a + 1;
+      const sa = addSkirt(i, 0);
+      const sb = addSkirt(i + 1, 0);
+      indices.push(a, b, sa, b, sb, sa);
+    }
+    for (let i = 0; i < segments; i++) {
+      const a = segments * (segments + 1) + i;
+      const b = a + 1;
+      const sa = addSkirt(i, segments);
+      const sb = addSkirt(i + 1, segments);
+      indices.push(a, sa, b, b, sa, sb);
+    }
+    for (let j = 0; j < segments; j++) {
+      const a = j * (segments + 1);
+      const b = a + (segments + 1);
+      const sa = addSkirt(0, j);
+      const sb = addSkirt(0, j + 1);
+      indices.push(a, sa, b, b, sa, sb);
+    }
+    for (let j = 0; j < segments; j++) {
+      const a = j * (segments + 1) + segments;
+      const b = a + (segments + 1);
+      const sa = addSkirt(segments, j);
+      const sb = addSkirt(segments, j + 1);
+      indices.push(a, b, sa, b, sb, sa);
+    }
+
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new BufferAttribute(uvs, 2));
+    geometry.setAttribute('color', new BufferAttribute(vcolors, 3));
+    geometry.setAttribute('aSlope', new BufferAttribute(slopes, 1));
+    geometry.setAttribute('aShore', new BufferAttribute(shores, 1));
+    geometry.setIndex(indices);
+    geometry.computeBoundingSphere();
+
+    const mesh = new Mesh(geometry, this.material);
+    mesh.position.set(originX, 0, originZ);
+    mesh.receiveShadow = level <= 1;
+    mesh.castShadow = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    mesh.renderOrder = -10 + level;
+    return mesh;
+  }
+
+  dispose(): void {
+    for (const tile of this.tiles.values()) {
+      this.group.remove(tile.mesh);
+      tile.mesh.geometry.dispose();
+    }
+    this.tiles.clear();
+    this.pending.length = 0;
+  }
+}

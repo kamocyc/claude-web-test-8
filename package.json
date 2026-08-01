@@ -1,0 +1,22 @@
+{
+  "name": "infinite-rail",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Infinite procedurally generated Japanese train driving simulator",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "^0.185.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.0",
+    "playwright": "^1.62.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
+  }
+}

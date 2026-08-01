@@ -1,0 +1,640 @@
+/* Cab overlay. Layout mirrors a real Japanese driver's display: running
+   information top left, speed and limit centre, route right, controller
+   readouts bottom right. */
+
+:root {
+  --panel-bg: linear-gradient(180deg, rgba(14, 18, 24, 0.82), rgba(8, 11, 15, 0.88));
+  --panel-border: rgba(150, 185, 214, 0.28);
+  --panel-glow: 0 6px 26px rgba(0, 0, 0, 0.45);
+  --text: #e9f2fa;
+  --text-dim: #9db3c6;
+  --accent: #5cc6ff;
+  --warn: #ffb03a;
+  --danger: #ff5f4d;
+  --good: #4ade80;
+  --font: 'Inter', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #05070a;
+  font-family: var(--font);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+#viewport {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+#hud {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  font-size: 14px;
+  z-index: 10;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  box-shadow: var(--panel-glow);
+  backdrop-filter: blur(9px) saturate(1.2);
+  -webkit-backdrop-filter: blur(9px) saturate(1.2);
+}
+
+/* --- next station -------------------------------------------------------- */
+
+.next-station {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  width: 320px;
+  padding: 10px 14px 12px;
+  border-radius: 0 0 14px 14px;
+  border-top: none;
+}
+
+.next-station__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.next-station__icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  opacity: 0.9;
+}
+
+.next-station__ja {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-left: 26px;
+  margin-top: 1px;
+}
+
+.progress {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(140, 170, 195, 0.22);
+  overflow: hidden;
+}
+
+.progress__fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #3aa5ff, #7fe3ff);
+  transition: width 120ms linear;
+}
+
+.next-station__distance {
+  margin-top: 6px;
+  text-align: right;
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- score --------------------------------------------------------------- */
+
+.score-panel {
+  position: absolute;
+  top: 96px;
+  left: 16px;
+  min-width: 190px;
+  padding: 9px 14px 10px;
+  border-radius: 12px;
+}
+
+.score-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.score-row + .score-row {
+  margin-top: 3px;
+}
+
+.score-row__label {
+  color: var(--text-dim);
+}
+
+.score-row__value {
+  font-weight: 600;
+}
+
+.value--late {
+  color: var(--warn);
+}
+
+.value--early {
+  color: var(--accent);
+}
+
+.value--ontime {
+  color: var(--good);
+}
+
+/* --- speed --------------------------------------------------------------- */
+
+.speed-panel {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px 10px 12px;
+}
+
+.speed-readout {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 16px;
+  row-gap: 2px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-readout__label {
+  color: var(--text-dim);
+}
+
+.speed-readout__value {
+  font-weight: 600;
+  text-align: right;
+}
+
+.speed-readout__value.over {
+  color: var(--danger);
+  text-shadow: 0 0 12px rgba(255, 80, 60, 0.55);
+}
+
+/* --- route --------------------------------------------------------------- */
+
+.route-panel {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  width: 340px;
+  padding: 10px 14px 12px;
+}
+
+.route-panel__title {
+  font-size: 13px;
+  font-weight: 600;
+  text-align: right;
+}
+
+.route-panel__service {
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: right;
+  margin-top: 1px;
+}
+
+.route-strip {
+  position: relative;
+  height: 54px;
+  margin-top: 10px;
+}
+
+.route-strip__line {
+  position: absolute;
+  top: 26px;
+  left: 6px;
+  right: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(150, 180, 205, 0.35);
+}
+
+.route-strip__progress {
+  position: absolute;
+  top: 26px;
+  left: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.route-stop {
+  position: absolute;
+  top: 21px;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  border-radius: 50%;
+  background: #0d1219;
+  border: 2px solid rgba(190, 215, 235, 0.8);
+}
+
+.route-stop--served {
+  background: rgba(120, 150, 175, 0.9);
+  border-color: rgba(120, 150, 175, 0.9);
+}
+
+.route-stop--next {
+  background: var(--accent);
+  border-color: #cdeeff;
+  box-shadow: 0 0 10px rgba(92, 198, 255, 0.8);
+}
+
+.route-stop__label {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  transform: translateX(-50%) rotate(42deg);
+  transform-origin: left top;
+}
+
+.route-badge {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 1px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(92, 198, 255, 0.16);
+  border: 1px solid rgba(92, 198, 255, 0.45);
+  color: #d6f0ff;
+}
+
+.route-operator {
+  position: absolute;
+  right: 0;
+  bottom: -2px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: rgba(160, 185, 205, 0.7);
+  border: 1px solid rgba(160, 185, 205, 0.4);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* --- controller readouts ------------------------------------------------- */
+
+.controls-panel {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.dials {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.readouts {
+  padding: 10px 14px;
+  min-width: 290px;
+}
+
+.readout-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 22px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.readout-row + .readout-row {
+  margin-top: 3px;
+}
+
+.readout-row__label {
+  color: var(--text-dim);
+}
+
+.readout-row__value {
+  font-weight: 600;
+  color: #b9ecff;
+}
+
+.readout-row__value.brake {
+  color: #ffd08a;
+}
+
+.clock {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(150, 185, 214, 0.2);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- transport buttons --------------------------------------------------- */
+
+.transport {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.transport__button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 62px;
+  padding: 8px 4px 6px;
+  border: none;
+  border-radius: 10px;
+  background: rgba(12, 16, 21, 0.75);
+  border: 1px solid rgba(150, 185, 214, 0.26);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background 140ms ease, transform 100ms ease;
+}
+
+.transport__button:hover {
+  background: rgba(30, 42, 54, 0.85);
+}
+
+.transport__button:active {
+  transform: scale(0.96);
+}
+
+.transport__glyph {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(210, 232, 248, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* --- messages and aid ---------------------------------------------------- */
+
+.message {
+  position: absolute;
+  top: 42%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 10px 26px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  border-radius: 10px;
+  background: rgba(8, 12, 16, 0.7);
+  border: 1px solid rgba(150, 185, 214, 0.3);
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+.message.visible {
+  opacity: 1;
+}
+
+.assist {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.94;
+}
+
+.assist__bar {
+  position: relative;
+  width: 240px;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(140, 170, 195, 0.2);
+  overflow: hidden;
+}
+
+.assist__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #4ade80, #ffd166);
+}
+
+.assist__marker {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  background: #ff5f4d;
+  box-shadow: 0 0 8px rgba(255, 95, 77, 0.8);
+}
+
+/* --- overlays ------------------------------------------------------------ */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 45%, rgba(10, 16, 24, 0.72), rgba(3, 5, 8, 0.94));
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+  z-index: 20;
+  transition: opacity 260ms ease;
+}
+
+.overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.overlay__card {
+  width: min(760px, 92vw);
+  padding: 30px 34px 26px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(16, 22, 30, 0.95), rgba(9, 12, 17, 0.97));
+  border: 1px solid rgba(150, 185, 214, 0.28);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+
+.overlay__title {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.overlay__subtitle {
+  margin: 6px 0 18px;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.key-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px 22px;
+  margin: 16px 0 22px;
+  font-size: 13px;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-dim);
+}
+
+kbd {
+  display: inline-block;
+  min-width: 24px;
+  padding: 2px 7px;
+  text-align: center;
+  border-radius: 5px;
+  background: rgba(200, 224, 244, 0.1);
+  border: 1px solid rgba(180, 210, 235, 0.3);
+  border-bottom-width: 2px;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.overlay__actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.button {
+  padding: 11px 24px;
+  border-radius: 10px;
+  border: 1px solid rgba(92, 198, 255, 0.5);
+  background: linear-gradient(180deg, rgba(70, 160, 220, 0.35), rgba(30, 90, 140, 0.35));
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: transform 100ms ease, background 160ms ease;
+}
+
+.button:hover {
+  background: linear-gradient(180deg, rgba(90, 185, 245, 0.5), rgba(40, 110, 165, 0.45));
+}
+
+.button:active {
+  transform: scale(0.98);
+}
+
+.button--ghost {
+  background: rgba(200, 224, 244, 0.06);
+  border-color: rgba(180, 210, 235, 0.28);
+  font-weight: 500;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.field select,
+.field input[type='range'] {
+  accent-color: var(--accent);
+  background: rgba(200, 224, 244, 0.08);
+  border: 1px solid rgba(180, 210, 235, 0.25);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 5px 8px;
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+/* --- debug --------------------------------------------------------------- */
+
+.debug {
+  position: absolute;
+  left: 16px;
+  top: 152px;
+  padding: 7px 11px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  line-height: 1.5;
+  display: none;
+}
+
+.debug.visible {
+  display: block;
+}
+
+.hint {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: rgba(190, 212, 230, 0.55);
+  letter-spacing: 0.04em;
+}
+
+@media (max-width: 1240px) {
+  .route-panel {
+    width: 240px;
+  }
+  .next-station {
+    width: 250px;
+  }
+  .readouts {
+    min-width: 220px;
+  }
+}

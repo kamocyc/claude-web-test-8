@@ -1,0 +1,208 @@
+import { Object3D, PerspectiveCamera, Quaternion, Vector3 } from 'three';
+import type { Consist } from '../train/Consist';
+import type { TrackPath } from '../world/TrackPath';
+import type { TerrainField } from '../world/TerrainField';
+import { trackAxes } from '../world/TrackFrame';
+import { clamp, damp, lerp, smoothstep } from '../core/MathUtils';
+
+export type CameraMode = 'cab' | 'chase' | 'lineside' | 'nose' | 'roof';
+
+export const CAMERA_MODES: CameraMode[] = ['cab', 'chase', 'lineside', 'nose', 'roof'];
+
+export const CAMERA_LABELS: Record<CameraMode, string> = {
+  cab: 'Cab',
+  chase: 'Chase',
+  lineside: 'Lineside',
+  nose: 'Nose',
+  roof: 'Roof',
+};
+
+const tmpA = new Vector3();
+const tmpB = new Vector3();
+const axisRight = new Vector3();
+const axisUp = new Vector3();
+const axisFwd = new Vector3();
+const quat = new Quaternion();
+
+/**
+ * Camera work.
+ *
+ * The cab view is the point of the game: the driver's eye, rigidly attached to
+ * a car that is itself pitching and rolling with the track, with free look and
+ * the constant fine vibration of a train at speed. The other views exist to
+ * show off the world and the stock.
+ */
+export class CameraRig {
+  mode: CameraMode = 'cab';
+  yaw = 0;
+  pitch = 0;
+  /** Vibration multiplier from the settings. */
+  shake = 1;
+
+  private readonly position = new Vector3();
+  private readonly target = new Vector3();
+  private lineSideAnchor = new Vector3();
+  private lineSideValidUntil = -1;
+  private jointPhase = 0;
+  private jointImpulse = 0;
+  private swayX = 0;
+  private swayY = 0;
+  private chasePosition = new Vector3();
+  private initialised = false;
+
+  constructor(
+    private readonly track: TrackPath,
+    private readonly field: TerrainField,
+  ) {}
+
+  cycle(): void {
+    const index = CAMERA_MODES.indexOf(this.mode);
+    this.mode = CAMERA_MODES[(index + 1) % CAMERA_MODES.length];
+    this.yaw = 0;
+    this.pitch = 0;
+    this.lineSideValidUntil = -1;
+  }
+
+  setMode(mode: CameraMode): void {
+    this.mode = mode;
+    this.yaw = 0;
+    this.pitch = 0;
+    this.lineSideValidUntil = -1;
+  }
+
+  look(dYaw: number, dPitch: number): void {
+    this.yaw = clamp(this.yaw + dYaw, -Math.PI * 0.95, Math.PI * 0.95);
+    this.pitch = clamp(this.pitch + dPitch, -0.8, 0.7);
+  }
+
+  /**
+   * Fine vibration: a fast component from the bogies plus a discrete kick each
+   * time a wheelset crosses a rail joint, both scaled by speed.
+   */
+  private updateVibration(dt: number, speed: number, elapsed: number): void {
+    const jointSpacing = 25;
+    this.jointPhase += speed * dt;
+    if (this.jointPhase > jointSpacing) {
+      this.jointPhase -= jointSpacing;
+      this.jointImpulse = Math.min(1, speed / 30);
+    }
+    this.jointImpulse = damp(this.jointImpulse, 0, 9, dt);
+
+    const intensity = smoothstep(0, 28, speed) * this.shake;
+    this.swayX =
+      (Math.sin(elapsed * 1.9) * 0.011 + Math.sin(elapsed * 4.7 + 1.3) * 0.005) * intensity;
+    this.swayY =
+      (Math.sin(elapsed * 13.3) * 0.0035 +
+        Math.sin(elapsed * 27.1) * 0.0016 +
+        this.jointImpulse * 0.012) *
+      intensity;
+  }
+
+  update(
+    camera: PerspectiveCamera,
+    consist: Consist,
+    speed: number,
+    dt: number,
+    elapsed: number,
+    trainS: number,
+  ): void {
+    this.updateVibration(dt, Math.abs(speed), elapsed);
+
+    const leadCar = consist.cars[0].group;
+    leadCar.updateMatrixWorld(true);
+
+    switch (this.mode) {
+      case 'cab':
+        this.updateCab(camera, consist, leadCar);
+        break;
+      case 'nose':
+        this.updateAttached(camera, leadCar, new Vector3(0, 1.15, -consist.spec.carLength / 2 - 0.9));
+        break;
+      case 'roof':
+        this.updateAttached(camera, leadCar, new Vector3(0, 4.9, -consist.spec.carLength / 2 + 2.5));
+        break;
+      case 'chase':
+        this.updateChase(camera, consist, dt, trainS);
+        break;
+      case 'lineside':
+        this.updateLineside(camera, consist, trainS);
+        break;
+    }
+
+    if (!this.initialised) {
+      this.chasePosition.copy(camera.position);
+      this.initialised = true;
+    }
+  }
+
+  private updateCab(camera: PerspectiveCamera, consist: Consist, leadCar: Object3D): void {
+    consist.getEyeWorld(this.position);
+    camera.position.copy(this.position);
+    camera.quaternion.copy(leadCar.quaternion);
+    // The car's local -Z is forward, which is exactly where the camera looks.
+    camera.rotateY(this.yaw + this.swayX);
+    camera.rotateX(this.pitch + this.swayY);
+  }
+
+  private updateAttached(
+    camera: PerspectiveCamera,
+    leadCar: Object3D,
+    localOffset: Vector3,
+  ): void {
+    tmpA.copy(localOffset).applyMatrix4(leadCar.matrixWorld);
+    camera.position.copy(tmpA);
+    camera.quaternion.copy(leadCar.quaternion);
+    camera.rotateY(this.yaw + this.swayX);
+    camera.rotateX(this.pitch + this.swayY);
+  }
+
+  private updateChase(camera: PerspectiveCamera, consist: Consist, dt: number, trainS: number): void {
+    const sample = this.track.sampleAt(trainS - 26);
+    trackAxes(sample, axisRight, axisUp, axisFwd);
+    tmpA
+      .set(sample.x, sample.y, sample.z)
+      .addScaledVector(axisRight, consist.lateral - 5.5)
+      .addScaledVector(axisUp, 7.5);
+    this.chasePosition.lerp(tmpA, 1 - Math.exp(-6 * dt));
+    camera.position.copy(this.chasePosition);
+
+    const lookSample = this.track.sampleAt(trainS - 8);
+    trackAxes(lookSample, axisRight, axisUp, axisFwd);
+    this.target
+      .set(lookSample.x, lookSample.y, lookSample.z)
+      .addScaledVector(axisRight, consist.lateral)
+      .addScaledVector(axisUp, 2.2);
+    camera.lookAt(this.target);
+    camera.rotateY(this.yaw);
+    camera.rotateX(this.pitch);
+  }
+
+  private updateLineside(camera: PerspectiveCamera, consist: Consist, trainS: number): void {
+    // Pick a spot beside the line ahead of the train and hold it until the
+    // train has gone past, like a fixed trackside camera.
+    if (trainS > this.lineSideValidUntil) {
+      const anchorS = trainS + 180;
+      const sample = this.track.sampleAt(anchorS);
+      trackAxes(sample, axisRight, axisUp, axisFwd);
+      const side = Math.random() > 0.5 ? 1 : -1;
+      this.lineSideAnchor
+        .set(sample.x, sample.y, sample.z)
+        .addScaledVector(axisRight, side * lerp(16, 34, Math.random()));
+      // Stand on the ground rather than at rail level: in a cutting the rail
+      // level would be underground.
+      const ground = this.field.heightAt(this.lineSideAnchor.x, this.lineSideAnchor.z).y;
+      this.lineSideAnchor.y = Math.max(ground, sample.y - 3) + lerp(1.7, 7, Math.random());
+      this.lineSideValidUntil = anchorS + 120;
+    }
+    camera.position.copy(this.lineSideAnchor);
+    consist.cars[0].group.getWorldPosition(tmpB);
+    camera.lookAt(tmpB.x, tmpB.y + 2.0, tmpB.z);
+    camera.rotateY(this.yaw);
+    camera.rotateX(this.pitch);
+  }
+
+  /** Quaternion of the lead car, used to orient audio. */
+  orientation(consist: Consist, out = quat): Quaternion {
+    return out.copy(consist.cars[0].group.quaternion);
+  }
+}
