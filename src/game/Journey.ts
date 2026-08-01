@@ -82,7 +82,7 @@ export class Journey {
     elapsed: number,
     train: TrainPhysics,
     limit: number,
-    setMessage: (text: string, seconds: number) => void,
+    setMessage: (key: string, seconds: number, suffix?: string) => void,
   ): void {
     const now = this.timeOfDay(elapsed);
     const station = this.nextStation(train.position);
@@ -101,7 +101,7 @@ export class Journey {
       if (this.overspeedPenaltyAccum > 25) {
         this.score -= this.overspeedPenaltyAccum;
         this.overspeedPenaltyAccum = 0;
-        setMessage('OVERSPEED', 2.5);
+        setMessage('msg.overspeed', 2.5);
       }
     } else {
       this.overspeedTime = Math.max(0, this.overspeedTime - dt * 0.5);
@@ -115,7 +115,7 @@ export class Journey {
     if (train.isEmergency && !this.emergencyUsed && train.speed > 1) {
       this.emergencyUsed = true;
       this.score -= 400;
-      setMessage('EMERGENCY BRAKE', 3);
+      setMessage('msg.emergency', 3);
     }
     if (!train.isEmergency) this.emergencyUsed = false;
 
@@ -134,7 +134,7 @@ export class Journey {
           // Ran through the platform without stopping.
           station.served = true;
           this.score -= 500;
-          setMessage('STATION PASSED', 3);
+          setMessage('msg.stationPassed', 3);
         }
         break;
       }
@@ -152,7 +152,7 @@ export class Journey {
         this.dwellRemaining -= dt;
         if (this.dwellRemaining <= 0) {
           this.phase = 'ready';
-          setMessage('DOORS CLOSING', 2.5);
+          setMessage('msg.doorsClosing', 2.5);
         }
         break;
       }
@@ -172,7 +172,7 @@ export class Journey {
     station: StationInfo,
     error: number,
     now: number,
-    setMessage: (text: string, seconds: number) => void,
+    setMessage: (key: string, seconds: number, suffix?: string) => void,
   ): void {
     const absError = Math.abs(error);
     let points = 0;
@@ -211,13 +211,25 @@ export class Journey {
 
     const label =
       rating === 'perfect'
-        ? 'PERFECT STOP'
+        ? 'msg.perfectStop'
         : rating === 'good'
-          ? 'GOOD STOP'
+          ? 'msg.goodStop'
           : rating === 'fair'
-            ? 'STOP OK'
-            : 'POOR STOP';
-    setMessage(`${label}  ${error >= 0 ? '+' : ''}${error.toFixed(2)} m`, 4);
+            ? 'msg.fairStop'
+            : 'msg.poorStop';
+    setMessage(label, 4, `  ${error >= 0 ? '+' : ''}${error.toFixed(2)} m`);
+  }
+
+  /**
+   * Re-bases the journey after the driver skips ahead down the line, so the
+   * running score does not count the skipped distance.
+   */
+  resetTo(position: number): void {
+    this.lastPosition = position;
+    this.phase = 'running';
+    this.doorsOpen = false;
+    this.doorProgress = 0;
+    this.dwellRemaining = 0;
   }
 
   /** True while the train must not move. */

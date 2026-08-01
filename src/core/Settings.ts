@@ -1,3 +1,5 @@
+import { detectLanguage, type Language } from '../ui/i18n';
+
 /** Graphics quality presets and user-tweakable options. */
 
 export type QualityLevel = 'low' | 'medium' | 'high' | 'ultra';
@@ -99,6 +101,8 @@ export const QUALITY_PROFILES: Record<QualityLevel, QualityProfile> = {
 
 export interface GameSettings {
   quality: QualityLevel;
+  /** Interface language. */
+  language: Language;
   masterVolume: number;
   /** Field of view of the cab camera, degrees. */
   fov: number;
@@ -114,6 +118,7 @@ const STORAGE_KEY = 'infinite-rail.settings.v1';
 
 export const DEFAULT_SETTINGS: GameSettings = {
   quality: 'high',
+  language: 'en',
   masterVolume: 0.8,
   fov: 62,
   shake: 1,
@@ -132,7 +137,11 @@ export function detectQuality(): QualityLevel {
 }
 
 export function loadSettings(): GameSettings {
-  const base: GameSettings = { ...DEFAULT_SETTINGS, quality: detectQuality() };
+  const base: GameSettings = {
+    ...DEFAULT_SETTINGS,
+    quality: detectQuality(),
+    language: detectLanguage(),
+  };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return base;

@@ -7,7 +7,12 @@
 
 export class Input {
   private readonly down = new Set<string>();
-  private readonly pressed = new Set<string>();
+  /**
+   * Presses are counted rather than flagged: on a slow frame several taps of
+   * the same key can arrive between two updates, and every one of them should
+   * move a notch.
+   */
+  private readonly pressed = new Map<string, number>();
   private readonly released = new Set<string>();
 
   /** Accumulated look delta in radians, consumed each frame by the camera. */
@@ -51,12 +56,17 @@ export class Input {
         'Tab',
         'Slash',
         'Backquote',
+        'Quote',
+        'BracketLeft',
+        'Enter',
+        'Comma',
+        'Period',
       ].includes(e.code)
     ) {
       e.preventDefault();
     }
     if (!e.repeat) {
-      this.pressed.add(e.code);
+      this.pressed.set(e.code, (this.pressed.get(e.code) ?? 0) + 1);
       this.down.add(e.code);
     }
   };
@@ -97,9 +107,21 @@ export class Input {
     return this.down.has(code);
   }
 
-  /** True on the frame the key went down. */
+  /**
+   * True if the key went down since the last call, consuming one press so that
+   * a burst of taps is delivered one at a time.
+   */
   wasPressed(code: string): boolean {
-    return this.pressed.has(code);
+    const count = this.pressed.get(code) ?? 0;
+    if (count <= 0) return false;
+    if (count === 1) this.pressed.delete(code);
+    else this.pressed.set(code, count - 1);
+    return true;
+  }
+
+  /** True if the key went down, without consuming the press. */
+  isPressed(code: string): boolean {
+    return (this.pressed.get(code) ?? 0) > 0;
   }
 
   wasReleased(code: string): boolean {

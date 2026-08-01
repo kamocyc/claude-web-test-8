@@ -160,6 +160,18 @@ body {
   color: var(--good);
 }
 
+.auto-badge {
+  margin-top: 7px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-align: center;
+  color: #0a1016;
+  background: linear-gradient(180deg, #7de08a, #35b05a);
+}
+
 /* --- speed --------------------------------------------------------------- */
 
 .speed-panel {

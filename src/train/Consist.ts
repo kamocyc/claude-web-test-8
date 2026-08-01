@@ -162,9 +162,10 @@ export class Consist {
 
   setHandlePositions(powerFraction: number, brakeFraction: number): void {
     if (!this.cab) return;
-    // Power is pulled back towards the driver, brake pushed away.
-    this.cab.masterHandle.rotation.x = -0.55 * powerFraction;
-    this.cab.brakeHandle.rotation.x = 0.6 * brakeFraction;
+    // Japanese practice: the master controller is pulled back towards the
+    // driver to take power, and the brake handle is pulled back to apply.
+    this.cab.masterHandle.rotation.x = 0.6 * powerFraction;
+    this.cab.brakeHandle.rotation.x = 0.55 * brakeFraction;
   }
 
   setWiper(angle: number): void {

@@ -104,20 +104,44 @@ export class TrainPhysics {
     return this.brakeNotch >= EMERGENCY_NOTCH;
   }
 
+  /**
+   * The two handles are mechanically independent, as they are on Japanese
+   * two-handle stock: moving the brake never drags the master controller with
+   * it. Traction is cut electrically while the brake is applied instead, which
+   * is what actually happens on the train.
+   */
   setPower(notch: number): void {
     this.powerNotch = clamp(Math.round(notch), 0, MAX_POWER_NOTCH);
-    if (this.powerNotch > 0) this.brakeNotch = 0;
   }
 
   setBrake(notch: number): void {
     this.brakeNotch = clamp(Math.round(notch), 0, EMERGENCY_NOTCH);
-    if (this.brakeNotch > 0) this.powerNotch = 0;
+  }
+
+  /** True while the brake interlock is holding traction off. */
+  get tractionCutOff(): boolean {
+    return this.brakeNotch > 0 || this.reverser === 0;
+  }
+
+  /**
+   * Moves the reverser one step towards forward (+1) or reverse (-1).
+   * Only possible at a stand, as the interlock on the real thing requires.
+   */
+  moveReverser(direction: number): boolean {
+    if (Math.abs(this.speed) > 0.2) return false;
+    this.reverser = clamp(this.reverser + Math.sign(direction), -1, 1);
+    return true;
   }
 
   /** Full service brake and power off, used when the game is paused or reset. */
   applyFullBrake(): void {
     this.powerNotch = 0;
     this.brakeNotch = MAX_BRAKE_NOTCH;
+  }
+
+  /** Label for the reverser position, for the cab display. */
+  get reverserKey(): string {
+    return this.reverser > 0 ? 'reverser.forward' : this.reverser < 0 ? 'reverser.reverse' : 'reverser.neutral';
   }
 
   /**
@@ -164,7 +188,7 @@ export class TrainPhysics {
     const spec = this.spec;
 
     // Traction and brake systems respond with a lag.
-    const powerDemand = this.reverser === 0 ? 0 : this.powerNotch / MAX_POWER_NOTCH;
+    const powerDemand = this.tractionCutOff ? 0 : this.powerNotch / MAX_POWER_NOTCH;
     const powerRate = powerDemand > this.tractionOutput ? 1.6 : 3.2;
     this.tractionOutput = damp(this.tractionOutput, powerDemand, powerRate, dt);
 

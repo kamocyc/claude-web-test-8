@@ -27,8 +27,10 @@ import {
 } from '../train/TrainPhysics';
 import { CameraRig, CAMERA_LABELS } from './CameraRig';
 import { Journey, stopPositionFor } from './Journey';
+import { AutoDriver } from './AutoDriver';
 import { Hud } from '../ui/Hud';
 import { Menu } from '../ui/Menu';
+import { getLanguage, setLanguage, t } from '../ui/i18n';
 import { AudioEngine } from '../audio/AudioEngine';
 import { generateRouteName, generateService, type RouteName, type ServiceInfo } from '../world/Names';
 
@@ -41,10 +43,10 @@ import { generateRouteName, generateService, type RouteName, type ServiceInfo } 
  */
 
 const WEATHER_PRESETS = [
-  { name: 'Clear', cloudCover: 0.18, rain: 0, wind: 2.4 },
-  { name: 'Fair', cloudCover: 0.42, rain: 0, wind: 3.6 },
-  { name: 'Overcast', cloudCover: 0.85, rain: 0, wind: 5.2 },
-  { name: 'Rain', cloudCover: 0.95, rain: 0.75, wind: 7.5 },
+  { key: 'weather.clear', cloudCover: 0.18, rain: 0, wind: 2.4 },
+  { key: 'weather.fair', cloudCover: 0.42, rain: 0, wind: 3.6 },
+  { key: 'weather.overcast', cloudCover: 0.85, rain: 0, wind: 5.2 },
+  { key: 'weather.rain', cloudCover: 0.95, rain: 0.75, wind: 7.5 },
 ];
 
 const MONTHS = [
@@ -70,6 +72,7 @@ export class Game {
   private traffic!: Traffic;
   private camera!: CameraRig;
   private journey!: Journey;
+  private auto!: AutoDriver;
   private route!: RouteName;
   private service!: ServiceInfo;
 
@@ -101,6 +104,8 @@ export class Game {
       : (Math.random() * 0xffffffff) >>> 0;
     const timeParam = Number(params.get('time'));
     this.forcedStartHour = params.has('time') && Number.isFinite(timeParam) ? timeParam : null;
+
+    setLanguage(this.settings.language);
 
     this.engine = new Engine(canvas, this.settings);
     this.input = new Input(canvas);
@@ -180,6 +185,7 @@ export class Game {
     this.camera.shake = this.settings.shake;
 
     this.journey = new Journey(this.world.track, startTime);
+    this.auto = new AutoDriver(this.world.track, this.journey);
     this.sky.updateEnvironment(this.engine.renderer, true);
 
     // Prime the world so the first frame is already populated.
@@ -219,6 +225,7 @@ export class Game {
 
   private applySettings(settings: GameSettings): void {
     this.settings = settings;
+    setLanguage(settings.language);
     saveSettings(settings);
     this.engine.applySettings(settings);
     this.camera.shake = settings.shake;
@@ -237,7 +244,7 @@ export class Game {
     this.running = true;
     this.paused = false;
     this.menu.hide();
-    this.hud.showMessage('DEPART WHEN READY', 3);
+    this.hud.showMessage(t('msg.depart'), 3);
   }
 
   pause(): void {
@@ -271,6 +278,8 @@ export class Game {
     const sample = track.sampleAt(this.train.position);
     const radius = Math.abs(sample.curvature) > 1e-6 ? 1 / Math.abs(sample.curvature) : Infinity;
 
+    this.auto.update(dt, this.train, this.sky.timeOfDay);
+
     // Doors open: the train is held.
     if (this.journey.heldAtPlatform) {
       this.train.setPower(0);
@@ -282,9 +291,9 @@ export class Game {
     const travelled = this.train.position - before;
 
     const limit = track.limitAt(this.train.position);
-    this.journey.update(dt, this.elapsed, this.train, limit, (text, seconds) => {
-      this.hud.showMessage(text, seconds);
-      if (text.startsWith('DOORS')) this.audio.doorAir();
+    this.journey.update(dt, this.elapsed, this.train, limit, (key, seconds, suffix) => {
+      this.hud.showMessage(t(key) + (suffix ?? ''), seconds);
+      if (key === 'msg.doorsClosing') this.audio.doorAir();
     });
 
     if (this.journey.phase === 'arrived' && this.journey.doorProgress < 0.05) {
@@ -343,53 +352,129 @@ export class Game {
       else this.pause();
     }
     if (input.wasPressed('F3')) this.debugVisible = !this.debugVisible;
+    if (input.wasPressed('KeyJ')) this.toggleLanguage();
+    if (input.wasPressed('KeyU')) this.toggleInterface();
 
     if (!this.running) {
       input.endFrame();
       return;
     }
 
-    // Master controller and brake.
-    if (input.wasPressed('KeyZ') || input.wasPressed('ArrowUp')) {
+    const shift = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
+
+    // Master controller: Z or / notch up, A or : notch down. The two handles
+    // are independent, so the brake never drags the controller with it.
+    // Loops rather than single checks, so a quick double tap moves two notches
+    // even if both land in the same frame.
+    while (input.wasPressed('KeyZ') || input.wasPressed('Slash')) {
+      this.driveManually();
       this.train.setPower(this.train.powerNotch + 1);
     }
-    if (input.wasPressed('KeyA') || input.wasPressed('ArrowDown')) {
-      if (this.train.powerNotch > 0) this.train.setPower(this.train.powerNotch - 1);
-      else this.train.setBrake(this.train.brakeNotch + 1);
+    while (input.wasPressed('KeyA') || input.wasPressed('Quote')) {
+      this.driveManually();
+      this.train.setPower(this.train.powerNotch - 1);
     }
-    if (input.wasPressed('Period') || input.wasPressed('ArrowRight')) {
+
+    // Brake: . applies a step, , releases one.
+    while (input.wasPressed('Period')) {
+      this.driveManually();
       this.train.setBrake(Math.min(this.train.brakeNotch + 1, MAX_BRAKE_NOTCH));
     }
-    if (input.wasPressed('Comma') || input.wasPressed('ArrowLeft')) {
+    while (input.wasPressed('Comma')) {
+      this.driveManually();
       this.train.setBrake(Math.max(0, this.train.brakeNotch - 1));
     }
-    if (input.wasPressed('Space')) this.train.setBrake(EMERGENCY_NOTCH);
-    if (input.wasPressed('KeyS')) this.train.setBrake(0);
+
+    // Emergency: Q or @.
+    if (input.wasPressed('KeyQ') || input.wasPressed('BracketLeft')) {
+      this.driveManually();
+      this.train.setBrake(EMERGENCY_NOTCH);
+    }
+
+    // Reverser, which only moves at a stand.
+    while (input.wasPressed('ArrowUp')) {
+      if (!this.train.moveReverser(1)) this.hud.showMessage(t('msg.reverserStop'), 1.6);
+    }
+    while (input.wasPressed('ArrowDown')) {
+      if (!this.train.moveReverser(-1)) this.hud.showMessage(t('msg.reverserStop'), 1.6);
+    }
+
+    // Horn: Enter for the low note, Shift+Enter for the high one.
+    this.audio.setHorn(input.isDown('Enter'), shift);
 
     if (input.wasPressed('KeyC')) {
-      this.camera.cycle();
-      this.hud.showMessage(CAMERA_LABELS[this.camera.mode], 1.2);
+      if (shift && this.camera.mode === 'window') this.camera.flipWindowSide();
+      else this.camera.cycle();
+      this.hud.showMessage(t(CAMERA_LABELS[this.camera.mode]), 1.2);
     }
+    if (input.wasPressed('KeyF')) {
+      this.auto.enabled = !this.auto.enabled;
+      this.hud.showMessage(t(this.auto.enabled ? 'msg.autoOn' : 'msg.autoOff'), 1.8);
+    }
+    if (input.wasPressed('KeyB')) this.skipToNextBiome();
     if (input.wasPressed('KeyL')) {
       this.headlights = !this.headlights;
-      this.hud.showMessage(this.headlights ? 'HEADLIGHTS ON' : 'HEADLIGHTS OFF', 1.2);
+      this.hud.showMessage(t(this.headlights ? 'msg.headlightsOn' : 'msg.headlightsOff'), 1.2);
     }
     if (input.wasPressed('KeyT')) {
-      const shift = 45 * 60;
-      this.sky.timeOfDay = (this.sky.timeOfDay + shift) % 86400;
-      this.world.track.shiftSchedule(shift);
-      this.elapsed -= shift;
+      const step = 45 * 60;
+      this.sky.timeOfDay = (this.sky.timeOfDay + step) % 86400;
+      this.world.track.shiftSchedule(step);
+      this.elapsed -= step;
     }
     if (input.wasPressed('KeyW')) {
       this.weatherIndex = (this.weatherIndex + 1) % WEATHER_PRESETS.length;
       this.applyWeather();
-      this.hud.showMessage(WEATHER_PRESETS[this.weatherIndex].name.toUpperCase(), 1.6);
+      this.hud.showMessage(t(WEATHER_PRESETS[this.weatherIndex].key), 1.6);
     }
-
-    this.audio.setHorn(input.isDown('KeyH'));
 
     this.camera.look(input.lookYaw, input.lookPitch);
     input.endFrame();
+  }
+
+  /** Any manual handle movement drops the train out of automatic driving. */
+  private driveManually(): void {
+    if (!this.auto.enabled) return;
+    this.auto.enabled = false;
+    this.hud.showMessage(t('msg.autoOff'), 1.5);
+  }
+
+  private toggleLanguage(): void {
+    const next = getLanguage() === 'ja' ? 'en' : 'ja';
+    setLanguage(next);
+    this.applySettings({ ...this.settings, language: next });
+  }
+
+  private toggleInterface(): void {
+    const visible = !this.hud.isVisible;
+    this.hud.setVisible(visible);
+    if (!visible) console.info(t('msg.uiHidden'));
+  }
+
+  /**
+   * Runs the train forward to wherever the landscape next changes character,
+   * carrying the timetable with it so the service is still running to time
+   * when it gets there.
+   */
+  private skipToNextBiome(): void {
+    const track = this.world.track;
+    const from = this.train.position;
+    const target = track.findNextBiomeChange(from);
+    if (target === null) return;
+
+    // Everything skipped counts as worked, and the timetable moves with us.
+    for (const station of track.stations) if (station.s < target - 60) station.served = true;
+    const averageSpeed = 70 / MS_TO_KMH;
+    track.shiftSchedule((target - from) / averageSpeed);
+
+    this.train.position = target;
+    this.train.speed = 0;
+    this.train.applyFullBrake();
+    this.journey.resetTo(target);
+    this.hud.showMessage(
+      `${t('msg.skipping')} ${t(`biome.${track.biomeAt(target)}`)}`,
+      2.5,
+    );
   }
 
   private applyWeather(): void {
@@ -487,7 +572,7 @@ export class Game {
       speed: Math.abs(this.train.speedKmh),
       limit,
       milepost: formatMilepost(this.mileageOffset + this.train.position),
-      routeTitle: `Route: ${this.route.operator} ${this.route.line}`,
+      routeTitle: `${this.route.operator} ${this.route.line}`,
       serviceLine: `${this.service.kind} #${this.service.number}`,
       operator: this.route.operator.replace('JR ', 'JR'),
       serviceBadge: this.service.kind,
@@ -496,11 +581,15 @@ export class Game {
       routeSpan,
       powerNotch: this.train.powerNotch,
       brakeNotch: this.train.brakeNotch,
+      reverser: this.train.reverser,
+      autoDriving: this.auto.enabled,
       brakePressure: clamp(this.train.brakeOutput, 0, 1),
       distanceToStop,
       timeOfDay,
       dateLabel: label,
-      assistTarget: this.journey.recommendedSpeed(this.train, distanceToStop, limit),
+      assistTarget: this.auto.enabled
+        ? this.auto.target
+        : this.journey.recommendedSpeed(this.train, distanceToStop, limit),
       assistEnabled: this.settings.assist,
       doorsOpen: this.journey.doorsOpen,
       dwellLeft: this.journey.dwellLeft,

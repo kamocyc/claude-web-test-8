@@ -5,16 +5,18 @@ import type { TerrainField } from '../world/TerrainField';
 import { trackAxes } from '../world/TrackFrame';
 import { clamp, damp, lerp, smoothstep } from '../core/MathUtils';
 
-export type CameraMode = 'cab' | 'chase' | 'lineside' | 'nose' | 'roof';
+export type CameraMode = 'cab' | 'window' | 'chase' | 'lineside' | 'nose' | 'roof';
 
-export const CAMERA_MODES: CameraMode[] = ['cab', 'chase', 'lineside', 'nose', 'roof'];
+export const CAMERA_MODES: CameraMode[] = ['cab', 'window', 'chase', 'lineside', 'nose', 'roof'];
 
+/** Translation keys for the mode names. */
 export const CAMERA_LABELS: Record<CameraMode, string> = {
-  cab: 'Cab',
-  chase: 'Chase',
-  lineside: 'Lineside',
-  nose: 'Nose',
-  roof: 'Roof',
+  cab: 'camera.cab',
+  window: 'camera.window',
+  chase: 'camera.chase',
+  lineside: 'camera.lineside',
+  nose: 'camera.nose',
+  roof: 'camera.roof',
 };
 
 const tmpA = new Vector3();
@@ -23,6 +25,9 @@ const axisRight = new Vector3();
 const axisUp = new Vector3();
 const axisFwd = new Vector3();
 const quat = new Quaternion();
+const windowRight = new Vector3();
+const windowUp = new Vector3();
+const windowOrigin = new Vector3();
 
 /**
  * Camera work.
@@ -49,6 +54,8 @@ export class CameraRig {
   private swayY = 0;
   private chasePosition = new Vector3();
   private initialised = false;
+  /** -1 looks out of the left hand side, +1 the right. */
+  private windowSide = -1;
 
   constructor(
     private readonly track: TrackPath,
@@ -115,6 +122,9 @@ export class CameraRig {
       case 'cab':
         this.updateCab(camera, consist, leadCar);
         break;
+      case 'window':
+        this.updateWindow(camera, consist);
+        break;
       case 'nose':
         this.updateAttached(camera, leadCar, new Vector3(0, 1.15, -consist.spec.carLength / 2 - 0.9));
         break;
@@ -154,6 +164,44 @@ export class CameraRig {
     camera.quaternion.copy(leadCar.quaternion);
     camera.rotateY(this.yaw + this.swayX);
     camera.rotateX(this.pitch + this.swayY);
+  }
+
+  /**
+   * The view a passenger gets: level with the windows, a little outside the
+   * glass so the scenery is not seen through a tinted pane, with the bodyside
+   * running along the edge of frame.
+   */
+  private updateWindow(camera: PerspectiveCamera, consist: Consist): void {
+    const index = Math.min(1, consist.cars.length - 1);
+    const car = consist.cars[index].group;
+    car.updateMatrixWorld(true);
+
+    // Work from the car's own axes rather than from a fixed yaw, so the view
+    // is guaranteed to face out across the lineside instead of into the
+    // glazing however the car happens to be oriented.
+    windowRight.setFromMatrixColumn(car.matrixWorld, 0).normalize();
+    windowUp.setFromMatrixColumn(car.matrixWorld, 1).normalize();
+    windowOrigin.setFromMatrixPosition(car.matrixWorld);
+
+    tmpA
+      .copy(windowOrigin)
+      .addScaledVector(windowRight, this.windowSide * 2.0)
+      .addScaledVector(windowUp, 2.45);
+    camera.position.copy(tmpA);
+
+    tmpB
+      .copy(tmpA)
+      .addScaledVector(windowRight, this.windowSide * 40)
+      .addScaledVector(windowUp, -4);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(tmpB);
+    camera.rotateY(this.yaw + this.swayX);
+    camera.rotateX(this.pitch + this.swayY);
+  }
+
+  /** Swaps the window view to the other side of the train. */
+  flipWindowSide(): void {
+    this.windowSide *= -1;
   }
 
   private updateChase(camera: PerspectiveCamera, consist: Consist, dt: number, trainS: number): void {

@@ -242,12 +242,22 @@ export class AudioEngine {
 
     this.tunnelSend.gain.setTargetAtTime(state.tunnel * 0.55, now, 0.4);
 
-    // Rail joints.
+    // Rail joints. Each joint is struck by both wheelsets of a bogie and then
+    // by the second bogie of the car, which is what makes the familiar
+    // two-beat "gatan-goton" rather than a single tick.
     this.jointDistance += state.distance;
     const jointSpacing = 25;
     while (this.jointDistance > jointSpacing) {
       this.jointDistance -= jointSpacing;
-      if (speed > 1.5) this.clack(clamp01(speed / 30));
+      if (speed < 1.2) continue;
+      const level = clamp01(speed / 26);
+      const v = Math.max(speed, 2);
+      const wheelbase = 2.1 / v;   // between the wheelsets of one bogie
+      const bogieGap = 13.6 / v;   // between the bogies of one car
+      this.clack(level, 0, 1.0);
+      this.clack(level * 0.85, wheelbase, 0.86);
+      this.clack(level * 0.6, bogieGap, 0.94);
+      this.clack(level * 0.5, bogieGap + wheelbase, 0.8);
     }
 
     // Brake noises: a hiss as the brakes release, a squeal as the train stops.
@@ -276,28 +286,47 @@ export class AudioEngine {
     }
   }
 
-  /** A short percussive impulse for rail joints and points. */
-  private clack(intensity: number): void {
-    if (!this.ctx) return;
+  /**
+   * A short percussive impulse: the wheel dropping into a rail joint. A low
+   * resonant body under a noise transient is what gives it weight.
+   */
+  private clack(intensity: number, delay = 0, pitch = 1): void {
+    if (!this.ctx || intensity < 0.01) return;
     const ctx = this.ctx;
+    const at = ctx.currentTime + Math.min(delay, 1.5);
+
     const source = ctx.createBufferSource();
     source.buffer = this.noiseBuffer;
     source.loop = true;
+    source.playbackRate.value = 0.8 + Math.random() * 0.5;
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.value = 180 + Math.random() * 220;
-    filter.Q.value = 2.5;
+    filter.frequency.value = (150 + Math.random() * 180) * pitch;
+    filter.Q.value = 1.8;
     const gain = ctx.createGain();
-    const now = ctx.currentTime;
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.08 * intensity + 0.001, now + 0.004);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(0.115 * intensity + 0.001, at + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.16);
     source.connect(filter);
     filter.connect(gain);
     gain.connect(this.master);
     gain.connect(this.tunnelSend);
-    source.start(now);
-    source.stop(now + 0.16);
+    source.start(at);
+    source.stop(at + 0.2);
+
+    // Body: the whole coach ringing at a low frequency.
+    const body = ctx.createOscillator();
+    body.type = 'sine';
+    body.frequency.setValueAtTime(88 * pitch, at);
+    body.frequency.exponentialRampToValueAtTime(46 * pitch, at + 0.13);
+    const bodyGain = ctx.createGain();
+    bodyGain.gain.setValueAtTime(0.0001, at);
+    bodyGain.gain.exponentialRampToValueAtTime(0.05 * intensity + 0.001, at + 0.008);
+    bodyGain.gain.exponentialRampToValueAtTime(0.0001, at + 0.2);
+    body.connect(bodyGain);
+    bodyGain.connect(this.master);
+    body.start(at);
+    body.stop(at + 0.24);
   }
 
   private hiss(amount: number): void {
@@ -393,11 +422,19 @@ export class AudioEngine {
     this.hiss(0.6);
   }
 
-  setHorn(on: boolean): void {
+  /**
+   * The horn. Japanese stock has two: a soft low note for warning people on
+   * the platform and a hard high one for emergencies.
+   */
+  setHorn(on: boolean, high = false): void {
     if (!this.started || !this.ctx) return;
     const now = this.ctx.currentTime;
+    const base = high ? [466, 622] : [311, 466];
+    for (let i = 0; i < this.hornOsc.length; i++) {
+      this.hornOsc[i].frequency.setTargetAtTime(base[i] ?? base[0], now, 0.01);
+    }
     this.hornGain.gain.cancelScheduledValues(now);
-    this.hornGain.gain.setTargetAtTime(on ? 0.09 : 0, now, on ? 0.02 : 0.08);
+    this.hornGain.gain.setTargetAtTime(on ? (high ? 0.12 : 0.085) : 0, now, on ? 0.02 : 0.08);
   }
 
   /** The pressure wave and roar of a train passing the other way. */

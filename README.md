@@ -8,7 +8,8 @@ paddy, riverside, suburb and city.
 
 Written in TypeScript on top of three.js. There are no art assets: every
 texture is synthesised on a canvas at load time and every mesh is generated
-from code, so the whole game is about 1 MB of JavaScript.
+from code, so the whole game is about 1 MB of JavaScript. The interface is
+available in English and Japanese.
 
 ```bash
 npm install
@@ -19,16 +20,26 @@ npm run preview    # serve the production build
 
 ## Driving
 
+The controls follow BVE convention, with the two handles independent as they
+are on Japanese two-handle stock: moving the brake never drags the master
+controller with it — traction is cut electrically instead.
+
 | Key | |
 | --- | --- |
-| `Z` / `↑` | Master controller up (N → P1 … P5) |
-| `A` / `↓` | Master controller down, then into the brake |
-| `.` / `→` | Brake step on (B1 … B8) |
-| `,` / `←` | Brake step off |
-| `S` | Release the brake completely |
-| `Space` | Emergency brake |
-| `H` | Horn |
-| `C` | Change camera (cab / chase / lineside / nose / roof) |
+| `Z` / `/` | Master controller notch up (N → P1 … P5) |
+| `A` / `:` | Master controller notch down |
+| `.` | Brake step on (B1 … B8) |
+| `,` | Brake step off |
+| `Q` / `@` | Emergency brake |
+| `↑` | Reverser towards forward (only at a stand) |
+| `↓` | Reverser towards reverse (only at a stand) |
+| `Enter` | Horn (low) |
+| `Shift` + `Enter` | Horn (high) |
+| `C` | Change camera; `Shift`+`C` flips the window view to the other side |
+| `F` | Automatic driving on/off |
+| `B` | Skip ahead to the next landscape |
+| `U` | Hide the cab display |
+| `J` | Switch between English and 日本語 |
 | `L` | Headlights |
 | `T` | Skip the clock forward 45 minutes (the timetable moves with it) |
 | `W` | Cycle the weather |
@@ -40,6 +51,19 @@ The job is the same as a real driver's: run at or below the permitted speed,
 stop with the cab against the stopping marker at the far end of each platform,
 and arrive on the minute. Score comes from stopping accuracy and punctuality;
 overspeeding, harsh handling and emergency brake applications cost you.
+
+Six views: the cab, a passenger window looking out sideways, a chase camera, a
+fixed lineside camera that picks a new spot for each pass, the nose, and the
+roof.
+
+**Automatic driving** (`F`) hands the train to an ATO that works to a target
+speed built from the line limit ahead and the braking curve to the next
+stopping mark, moving a notch at a time so the ride stays smooth. Touching any
+handle takes control back.
+
+**Skip to the next landscape** (`B`) runs the service forward to wherever the
+line next changes character — out of the forest and onto the coast, say —
+carrying the timetable with it so you arrive still running to time.
 
 `?seed=12345` fixes the route and `?time=15.5` fixes the departure hour, so a
 particular line can be shared or replayed. `?capture=1` pins the drawing buffer
@@ -118,10 +142,14 @@ trains you meet on the opposite road are real trains, not a sound effect.
 
 Everything is synthesised in the Web Audio graph (`src/audio/AudioEngine.ts`):
 a VVVF-style oscillator bank whose frequency tracks the motor, filtered noise
-for rolling and wind, rail joints fired by distance travelled rather than by a
-timer, brake squeal and release hiss, a compressor that cuts in now and then, a
-two-tone horn, crossing bells, and a short feedback delay that opens up when a
-tunnel closes in.
+for rolling and wind, brake squeal and release hiss, a compressor that cuts in
+now and then, two horns, crossing bells, and a short feedback delay that opens
+up when a tunnel closes in.
+
+Rail joints are fired by distance travelled rather than by a timer, and each
+joint is struck four times — both wheelsets of the leading bogie, then both of
+the trailing one — which is what turns a tick into the familiar
+*gatan-goton* as the spacing closes up with speed.
 
 ## Layout
 
@@ -135,7 +163,7 @@ src/
   game/       game loop, journey and scoring, cameras
   ui/         cab display, dials, menus
   audio/      synthesised sound
-tools/        headless screenshot capture
+tools/        headless screenshot capture and smoke test
 ```
 
 ## Notes

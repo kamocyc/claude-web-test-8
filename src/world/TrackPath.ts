@@ -289,6 +289,25 @@ export class TrackPath {
     return dominantBiome(this.at(this.sampleIndex(s)).weights);
   }
 
+  /**
+   * Chainage at which the line has fully entered a different landscape,
+   * generating more route as needed. Returns null if nothing changes within
+   * `maxDistance`, which in practice never happens.
+   */
+  findNextBiomeChange(from: number, maxDistance = 24000): number | null {
+    const current = this.biomeAt(from);
+    for (let s = from + 300; s < from + maxDistance; s += 120) {
+      this.extendTo(s + 900);
+      if (this.biomeAt(s) !== current) {
+        // Land a little way in, so the arrival is unmistakably the new scenery.
+        const target = s + 500;
+        this.extendTo(target + 1200);
+        return target;
+      }
+    }
+    return null;
+  }
+
   /** Lowest speed limit between two chainages - used by the driving aid. */
   minLimitBetween(s0: number, s1: number): number {
     const i0 = this.sampleIndex(s0);

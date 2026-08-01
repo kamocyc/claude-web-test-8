@@ -31,7 +31,7 @@ const browser = await chromium.launch({
   ],
 });
 
-const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
 page.on('pageerror', (error) => console.error('[page error]', error.message));
 
 await page.goto(url.includes('capture=') ? url : `${url}${url.includes('?') ? '&' : '?'}capture=1`, {
