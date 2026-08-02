@@ -1,6 +1,6 @@
 import { Object3D, PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import type { Consist } from '../train/Consist';
-import type { TrackPath } from '../world/TrackPath';
+import { STRUCT_TUNNEL, type TrackPath } from '../world/TrackPath';
 import type { TerrainField } from '../world/TerrainField';
 import { trackAxes } from '../world/TrackFrame';
 import { clamp, damp, lerp, smoothstep } from '../core/MathUtils';
@@ -207,10 +207,14 @@ export class CameraRig {
   private updateChase(camera: PerspectiveCamera, consist: Consist, dt: number, trainS: number): void {
     const sample = this.track.sampleAt(trainS - 26);
     trackAxes(sample, axisRight, axisUp, axisFwd);
+    // Inside a bore the usual stand-off would put the camera in the rock, so
+    // it tucks in behind the train instead. The chase position is damped, so
+    // the move in and out of a tunnel is a glide rather than a cut.
+    const inTunnel = sample.structure === STRUCT_TUNNEL;
     tmpA
       .set(sample.x, sample.y, sample.z)
-      .addScaledVector(axisRight, consist.lateral - 5.5)
-      .addScaledVector(axisUp, 7.5);
+      .addScaledVector(axisRight, consist.lateral - (inTunnel ? 3.0 : 5.5))
+      .addScaledVector(axisUp, inTunnel ? 3.4 : 7.5);
     this.chasePosition.lerp(tmpA, 1 - Math.exp(-6 * dt));
     camera.position.copy(this.chasePosition);
 
@@ -240,6 +244,13 @@ export class CameraRig {
       // level would be underground.
       const ground = this.field.heightAt(this.lineSideAnchor.x, this.lineSideAnchor.z).y;
       this.lineSideAnchor.y = Math.max(ground, sample.y - 3) + lerp(1.7, 7, Math.random());
+      if (sample.structure === STRUCT_TUNNEL) {
+        // No standing beside the line in here: take the shot from the walkway.
+        this.lineSideAnchor
+          .set(sample.x, sample.y, sample.z)
+          .addScaledVector(axisRight, side * 3.7)
+          .addScaledVector(axisUp, 1.6);
+      }
       this.lineSideValidUntil = anchorS + 120;
     }
     camera.position.copy(this.lineSideAnchor);

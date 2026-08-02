@@ -139,15 +139,20 @@ const skyFragment = /* glsl */ `
     if (dir.y > 0.005) {
       vec2 cuv = dir.xz / dir.y;
       vec2 drift = uWindDir.xz * uTime * uCloudSpeed;
-      float base = fbm(cuv * 0.055 + drift * 0.01);
-      float detail = fbm(cuv * 0.18 + drift * 0.026 + base);
+      // Frequency matters more than coverage here: at the old scale barely
+      // three noise cells spanned the whole dome, so a given view of the sky
+      // was as likely as not to contain no cloud at all.
+      float base = fbm(cuv * 0.2 + drift * 0.02);
+      float detail = fbm(cuv * 0.62 + drift * 0.05 + base);
       float density = base * 0.75 + detail * 0.35;
-      float coverage = mix(0.78, 0.24, uCloudCover);
+      // Even a clear day has fair weather cumulus in it; an empty sky is the
+      // quickest way to make a landscape look unfinished.
+      float coverage = mix(0.62, 0.18, uCloudCover);
       float cloud = smoothstep(coverage, coverage + 0.22, density);
       cloud *= smoothstep(0.005, 0.09, dir.y); // fade into the horizon haze
 
       // Shade the cloud by sampling the field towards the sun.
-      vec2 lightUv = cuv * 0.055 + drift * 0.01 + uSunDir.xz * 0.35;
+      vec2 lightUv = cuv * 0.2 + drift * 0.02 + uSunDir.xz * 0.6;
       float lit = smoothstep(coverage, coverage + 0.3, fbm(lightUv) * 0.75 + detail * 0.35);
       vec3 cloudLit = mix(vec3(1.0, 0.97, 0.93), sunTint * 1.25, dusk * 0.8) * (0.45 + day * 0.75);
       vec3 cloudDark = mix(vec3(0.16, 0.18, 0.22), vec3(0.30, 0.22, 0.24), dusk) * (0.35 + day * 0.8);
@@ -340,7 +345,9 @@ export class SkySystem {
 
     // Sky bounce. The prefiltered environment map already provides most of the
     // indirect light, so this is only a gentle fill.
-    const hemiIntensity = lerp(0.04, 0.10, day) * lerp(1, 3.2, overcast) + night * 0.03;
+    // Enough sky bounce that a hillside shadow still shows what is in it: with
+    // only the environment map filling them, shadows read as holes.
+    const hemiIntensity = lerp(0.05, 0.24, day) * lerp(1, 2.2, overcast) + night * 0.03;
     this.hemi.intensity = hemiIntensity;
     this.hemi.color.setRGB(
       lerp(0.05, 0.55, day) + dusk * 0.25,
@@ -352,7 +359,7 @@ export class SkySystem {
       lerp(0.03, 0.26, day),
       lerp(0.04, 0.20, day),
     );
-    this.ambient.intensity = lerp(0.02, 0.035, day) + overcast * 0.04;
+    this.ambient.intensity = lerp(0.03, 0.07, day) + overcast * 0.04;
 
     // Keep the sun rig centred on the camera so shadows follow the train.
     const dist = 260;

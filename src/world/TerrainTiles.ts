@@ -30,8 +30,8 @@ interface TileLevel {
 const LEVELS: TileLevel[] = [
   { size: 128, segments: 32, radius: 3 },
   { size: 256, segments: 32, radius: 3 },
-  { size: 512, segments: 32, radius: 3 },
-  { size: 1024, segments: 24, radius: 3 },
+  { size: 512, segments: 28, radius: 3 },
+  { size: 1024, segments: 20, radius: 3 },
   // Coarse enough and a distant ridge turns into a row of facets against the
   // sky, which is the first thing that gives a generated landscape away.
   { size: 2048, segments: 16, radius: 3 },
