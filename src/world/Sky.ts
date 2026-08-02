@@ -327,7 +327,7 @@ export class SkySystem {
 
     // Sun light: warm and weak at the horizon, neutral and strong at noon.
     // Kept well above the sky bounce so shadows read as shadows.
-    const sunIntensity = lerp(0.0, 5.4, smoothstep(-0.05, 0.28, e)) * lerp(1, 0.20, overcast);
+    const sunIntensity = lerp(0.0, 4.5, smoothstep(-0.05, 0.28, e)) * lerp(1, 0.20, overcast);
     this.sun.intensity = sunIntensity;
     this.sun.color.setRGB(
       lerp(1.0, 1.0, day),

@@ -48,8 +48,11 @@ for (const mode of modes) {
   const dataUrl = await page.evaluate(() => {
     const game = window.game;
     game.engine.stop();
+    // Straight to the canvas: on software GL the watchdog usually has the post
+    // chain bypassed by now, and calling the composer then returns a black
+    // frame.
+    game.engine.renderer.setRenderTarget(null);
     game.engine.renderer.render(game.engine.scene, game.engine.camera);
-    game.engine.composer.render(0.016);
     const png = document.getElementById('viewport').toDataURL('image/png');
     game.engine.start();
     return png;

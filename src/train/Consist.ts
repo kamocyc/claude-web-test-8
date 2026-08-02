@@ -1,5 +1,5 @@
 import { Color, Group, Matrix4, MeshBasicMaterial, SpotLight, Vector3 } from 'three';
-import { createCab, createCar, type CabModel, type CarModel } from './TrainModel';
+import { createCab, createCar, WIPER_PARK, type CabModel, type CarModel } from './TrainModel';
 import { trackAxes } from '../world/TrackFrame';
 import { TRACK_SPACING, type TrackPath } from '../world/TrackPath';
 import type { TrainSpec } from './TrainPhysics';
@@ -170,7 +170,7 @@ export class Consist {
 
   setWiper(angle: number): void {
     if (!this.cab) return;
-    this.cab.wiper.rotation.z = -0.6 + angle;
+    this.cab.wiper.rotation.z = WIPER_PARK + angle;
   }
 
   dispose(): void {

@@ -144,14 +144,32 @@ export function createTerrainMaterial(): MeshStandardMaterial {
         '#include <map_fragment>',
         `
          vec2 groundUv = vWorldPos.xz * uDetailScale;
-         vec4 grassTex = texture2D(map, groundUv);
-         // Break up tiling with a second, much larger sample.
-         vec4 grassFar = texture2D(map, groundUv * 0.137);
-         grassTex = mix(grassTex, grassTex * grassFar.g * 1.85, 0.45);
-         vec4 rockTex = texture2D(uRockMap, vWorldPos.xz * uDetailScale * 0.55);
-         vec4 sandTex = texture2D(uSandMap, groundUv * 1.4);
+         float viewDist = length(vWorldPos - cameraPosition);
 
-         vec4 blended = mix(grassTex, rockTex, smoothstep(0.32, 0.72, vSlope));
+         // Three scales of the same sheet: a crisp one underfoot that fades
+         // out before it can alias, the working scale, and a very large one
+         // that varies the colour from field to field so the tiling never
+         // announces itself.
+         vec4 grassMid = texture2D(map, groundUv);
+         vec4 grassFar = texture2D(map, groundUv * 0.171);
+         vec4 grassNear = texture2D(map, groundUv * 4.3);
+         vec4 grassTex = grassMid * (0.66 + grassFar.g * 0.82);
+         grassTex = mix(grassTex, grassTex * (0.58 + grassNear.g * 0.9),
+                        0.5 * (1.0 - smoothstep(7.0, 46.0, viewDist)));
+
+         // Rock is projected sideways on anything steep, so cliffs and the
+         // batter of a cutting show strata instead of a smeared plan view.
+         vec2 rockFlat = vWorldPos.xz * uDetailScale * 0.55;
+         vec2 rockSide = vec2((vWorldPos.x + vWorldPos.z) * 0.707, vWorldPos.y) * uDetailScale * 0.8;
+         vec4 rockTex = mix(
+           texture2D(uRockMap, rockFlat),
+           texture2D(uRockMap, rockSide),
+           smoothstep(0.18, 0.55, vSlope));
+         vec4 sandTex = texture2D(uSandMap, groundUv * 1.4) * (0.72 + texture2D(uSandMap, groundUv * 0.2).g * 0.62);
+
+         // A ragged edge between turf and rock rather than a contour line.
+         float rocky = smoothstep(0.30, 0.68, vSlope + (grassFar.r - 0.5) * 0.22);
+         vec4 blended = mix(grassTex, rockTex, rocky);
          blended = mix(blended, sandTex, vShore);
          diffuseColor *= blended;
         `,
@@ -261,9 +279,12 @@ export function getFoliageMaterial(): MeshStandardMaterial {
       alphaTest: 0.42,
       transparent: false,
       side: DoubleSide,
-      roughness: 0.86,
+      roughness: 0.88,
       metalness: 0,
       vertexColors: true,
+      // Leaves are not mirrors: too much sky reflected off them and a wood
+      // washes out to a pale grey-green.
+      envMapIntensity: 0.45,
     });
     patchWind(foliageMaterial, 0.11, 0.32);
   }
@@ -280,6 +301,7 @@ export function getGrassMaterial(): MeshStandardMaterial {
       roughness: 0.94,
       metalness: 0,
       vertexColors: true,
+      envMapIntensity: 0.5,
     });
     patchWind(grassMaterial, 0.055, 1.35);
   }

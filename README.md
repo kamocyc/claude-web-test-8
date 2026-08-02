@@ -110,6 +110,16 @@ close in and coarsening by powers of two out to the fog limit, with a downward
 skirt hiding the LOD seams — plus a fine track-space strip that resolves the
 earthworks the tiles cannot.
 
+**Tunnels** are the one thing a height field cannot express: ground that arches
+over the line. So it does not try. The hillside a tunnel is driven through
+rises over the last 170 m of the approach — which turns the run in to the
+portal into a cutting that deepens naturally — and through the bore itself the
+ground keeps the formation, with a slot left open along the line that widens
+from exactly the width of the approach cutting at the portal to what the bore
+needs a few metres in. `buildTunnels` then caps that slot with a piece of
+hillside cut to the same heights, so it seals without a seam, and the portal
+head wall is the face of that cap with the arch punched through it.
+
 **Chunks** (`src/world/Chunk.ts`) cover 250 m of line each and carry the
 permanent way, overhead line, signalling, stations, structures and scenery.
 They are built ahead of the train inside a per-frame time budget and released
@@ -129,8 +139,14 @@ behind it, so entering a city never stalls a frame.
 - Post: bloom on genuine highlights only, then a grade pass with lateral
   chromatic aberration, split toning, vignette, film grain, windscreen glare
   and a wet-glass term for rain.
-- Vegetation and grass sway in a shared wind field; instance colours give a
-  forest its variation without a single unique material.
+- Vegetation and grass sway in a shared wind field; instance colours and three
+  generated crown shapes per species give a forest its variation without a
+  single unique material.
+- The ground samples its sheet at three scales — crisp underfoot, working, and
+  very large for field-to-field colour — and projects rock sideways on anything
+  steep, so a cutting shows strata rather than a smeared plan view.
+- Facades scale their texture from the instance's own size, so a four storey
+  block and a twenty storey tower have floors the same height.
 
 ## The train
 

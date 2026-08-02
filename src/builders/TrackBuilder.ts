@@ -92,9 +92,16 @@ export function buildFormation(ctx: ChunkContext): void {
       colors[idx * 3] = col.r * tint;
       colors[idx * 3 + 1] = col.g * tint;
       colors[idx * 3 + 2] = col.b * tint;
+      // The cess: ballast dust and gravel rather than turf for a couple of
+      // metres beyond the shoulder, which is what the eye expects beside a
+      // running line. The sand sheet doubles as that gravel.
+      const cess = 0.6 * (1 - smoothstep(5.4, 11, Math.abs(lateral)));
       shores[idx] = clamp01(
-        (1 - smoothstep(0.4, 3.4, y - SEA_LEVEL)) * smoothstep(-2.5, 0.4, y - SEA_LEVEL) * 1.15 +
-          (y < SEA_LEVEL ? 0.85 : 0),
+        Math.max(
+          cess,
+          (1 - smoothstep(0.4, 3.4, y - SEA_LEVEL)) * smoothstep(-2.5, 0.4, y - SEA_LEVEL) * 1.15 +
+            (y < SEA_LEVEL ? 0.85 : 0),
+        ),
       );
       worldPositions.push(p.clone().set(x, y, z));
     }

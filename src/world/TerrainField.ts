@@ -8,6 +8,19 @@ export const FORMATION_DROP = 0.9;
 export const FORMATION_HALF = 5.6;
 /** Lateral reach of the detailed track-space corridor mesh. */
 export const CORRIDOR_HALF = 110;
+/**
+ * Half width of the slot left open along a tunnel bore.
+ *
+ * The ground is a height field, so it cannot arch over anything: were it
+ * allowed to close across the line inside a tunnel it would appear as a wall
+ * hanging in the bore. Instead the formation is carried straight through and
+ * `buildTunnels` caps the slot over with a piece of hillside.
+ */
+export const BORE_HALF = 7.4;
+/** Least thickness of ground carried over a bore, above the rail head. */
+export const TUNNEL_COVER = 10;
+/** Distance over which the hill a tunnel is bored through rises, metres. */
+const RIDGE_RAMP = 170;
 
 export interface ProjectionResult {
   /** Chainage of the nearest point on the centre line. */
@@ -161,7 +174,57 @@ export class TerrainField {
     );
 
     h = this.carveRivers(h, sample, lateral, x, z);
+    h = this.raiseTunnelRidge(h, sample, lateral, x, z);
     return h;
+  }
+
+  /**
+   * The hillside a tunnel is driven through.
+   *
+   * A bore only makes sense if there is something above it, so the ground is
+   * lifted into a ridge over the tunnel and for a way either side of it. The
+   * ramp reaches its full height exactly at the portal, which is what lets the
+   * line run into the hill through a cutting that deepens naturally instead of
+   * meeting a step in the ground.
+   */
+  private raiseTunnelRidge(h: number, sample: TrackSample, lateral: number, x: number, z: number): number {
+    const s = sample.s;
+    let out = h;
+    for (const tunnel of this.track.tunnels) {
+      if (s < tunnel.sStart - RIDGE_RAMP || s > tunnel.sEnd + RIDGE_RAMP) continue;
+      const ramp = Math.min(
+        smoothstep(tunnel.sStart - RIDGE_RAMP, tunnel.sStart, s),
+        smoothstep(tunnel.sEnd + RIDGE_RAMP, tunnel.sEnd, s),
+      );
+      const ax = Math.abs(lateral);
+      // The crest clears the bore over the line and climbs away from it, so the
+      // tunnel reads as a spur of the hillside rather than a lump on the map.
+      const relief =
+        38 * smoothstep(0, 300, ax) +
+        Math.max(0, this.noise.ridges.fbm(x * 0.0026, z * 0.0026, 3)) * 22 * smoothstep(0, 90, ax);
+      const crest = sample.y + TUNNEL_COVER + relief;
+      out += ramp * Math.max(0, crest - out);
+    }
+    return out;
+  }
+
+  /** How far `s` is inside the tunnel containing it; 0 when it is outside one. */
+  private mouthDistance(s: number): number {
+    for (const tunnel of this.track.tunnels) {
+      if (s >= tunnel.sStart && s <= tunnel.sEnd) {
+        return Math.max(0, Math.min(s - tunnel.sStart, tunnel.sEnd - s));
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * Height of the ground carried over a bore: the hillside as it would be with
+   * no slot cut in it. `buildTunnels` caps the slot at exactly this height, so
+   * the cap and the terrain meet without a seam.
+   */
+  tunnelCoverHeight(sample: TrackSample, lateral: number, x: number, z: number): number {
+    return Math.max(this.natural(sample, lateral, x, z), sample.y + TUNNEL_COVER);
   }
 
   /** Cuts river channels and lineside canals into the natural surface. */
@@ -216,9 +279,20 @@ export class TerrainField {
     }
 
     if (sample.structure === STRUCT_TUNNEL) {
-      // Hillside above the bore.
-      const cover = smoothstep(0, 70, ax);
-      return Math.max(nat, sample.y + 14 * (0.35 + cover * 0.65)) + tileBias;
+      // Inside a bore the ground keeps the formation and opens out to the slot
+      // the bore needs, then climbs the hillside on the same 1:1.65 batter the
+      // approach cutting uses. At the portal the slot is exactly as wide as the
+      // cutting outside it, so the two meet without a step.
+      const hill = Math.max(nat, sample.y + TUNNEL_COVER);
+      const formationY = sample.y - FORMATION_DROP;
+      const mouth = smoothstep(0, 26, this.mouthDistance(sample.s));
+      // At the mouth the slot is the approach cutting itself, batter and all;
+      // away from the portal it closes to the least the bore needs, so the cap
+      // over it stays small.
+      const batter = clamp(Math.abs(hill - formationY) * 1.65, 4, 70);
+      const slopeWidth = lerp(batter, 5, mouth);
+      const half = lerp(FORMATION_HALF, BORE_HALF, mouth);
+      return lerp(formationY, hill, smoothstep(half, half + slopeWidth, ax)) + tileBias;
     }
 
     const formationY = sample.y - FORMATION_DROP;

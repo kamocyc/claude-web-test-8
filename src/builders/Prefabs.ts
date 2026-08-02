@@ -15,6 +15,7 @@ import {
   type Material,
 } from 'three';
 import { textures } from '../materials/TextureFactory';
+import { hashFloat } from '../core/Random';
 import { getFoliageMaterial, getGrassMaterial } from '../materials/Materials';
 import type { InstanceCollector } from './MeshBuilder';
 
@@ -96,6 +97,68 @@ export function crossCards(count = 3): BufferGeometry {
   }
   geo = mergeGeometries(parts);
   cardCache.set(count, geo);
+  return geo;
+}
+
+const coniferCache = new Map<number, BufferGeometry>();
+/**
+ * Conifer crown: tiers of foliage tapering to a point, each one turned and
+ * nudged off centre so the silhouette is not a stack of perfect cones. Three
+ * variants are enough to stop a hillside looking cloned.
+ */
+export function coniferCrown(variant: number): BufferGeometry {
+  let geo = coniferCache.get(variant);
+  if (geo) return geo;
+  const parts: BufferGeometry[] = [];
+  const tiers = 5 + (variant % 3);
+  for (let i = 0; i < tiers; i++) {
+    const t = i / (tiers - 1);
+    const r = Math.pow(1 - t, 0.78) * (0.9 + hashFloat(variant, i, 1) * 0.22);
+    const h = 0.3 - t * 0.08 + hashFloat(variant, i, 2) * 0.06;
+    const cone = unitCone(7).clone();
+    cone.scale(r, h + 0.14, r);
+    cone.rotateY(hashFloat(variant, i, 3) * 6.28);
+    cone.translate(
+      (hashFloat(variant, i, 4) - 0.5) * 0.07,
+      t * 0.8 - (i === 0 ? 0.04 : 0),
+      (hashFloat(variant, i, 5) - 0.5) * 0.07,
+    );
+    parts.push(cone);
+  }
+  geo = mergeGeometries(parts);
+  coniferCache.set(variant, geo);
+  return geo;
+}
+
+const canopyCache = new Map<number, BufferGeometry>();
+/**
+ * Broadleaf canopy: crossed leaf cards plus a couple of tilted ones over the
+ * top, which is what stops a tree reading as a flat cut-out when you pass it.
+ */
+export function broadleafCanopy(variant: number): BufferGeometry {
+  let geo = canopyCache.get(variant);
+  if (geo) return geo;
+  const parts: BufferGeometry[] = [];
+  const upright = 4;
+  for (let i = 0; i < upright; i++) {
+    const plane = new PlaneGeometry(1, 1);
+    plane.translate(0, 0.5, 0);
+    const s = 0.82 + hashFloat(variant, i, 6) * 0.3;
+    plane.scale(s, s, s);
+    plane.rotateY((i / upright) * Math.PI + hashFloat(variant, i, 7) * 0.3);
+    plane.translate((hashFloat(variant, i, 8) - 0.5) * 0.16, (0.5 - s * 0.5) + hashFloat(variant, i, 9) * 0.1, 0);
+    parts.push(plane);
+  }
+  for (let i = 0; i < 2; i++) {
+    const plane = new PlaneGeometry(1, 1);
+    plane.rotateX(-Math.PI / 2 + (hashFloat(variant, i, 10) - 0.5) * 0.6);
+    plane.scale(0.86, 0.86, 0.86);
+    plane.rotateY(hashFloat(variant, i, 11) * 6.28);
+    plane.translate(0, 0.58 + i * 0.22, 0);
+    parts.push(plane);
+  }
+  geo = mergeGeometries(parts);
+  canopyCache.set(variant, geo);
   return geo;
 }
 
@@ -255,10 +318,11 @@ export function trunkMaterial(): MeshStandardMaterial {
 export function coniferMaterial(): MeshStandardMaterial {
   return cached('conifer', () => {
     const m = new MeshStandardMaterial({
-      roughness: 0.9,
+      roughness: 0.92,
       metalness: 0,
       vertexColors: true,
       flatShading: true,
+      envMapIntensity: 0.45,
     });
     return m;
   });
@@ -296,7 +360,14 @@ export function roofMaterial(): MeshStandardMaterial {
   });
 }
 
-/** Facade material for blocks and towers; windows glow after dark. */
+/**
+ * Facade material for blocks and towers; windows glow after dark.
+ *
+ * The sheet carries eight floors of eight windows, and the shader scales its
+ * UVs by the instance's own size, so a four storey block and a twenty storey
+ * tower both end up with floors the same height and windows the same width
+ * instead of the texture being stretched to fit.
+ */
 export function facadeMaterial(variant: number): MeshStandardMaterial {
   return cached(`facade${variant}`, () => {
     const m = new MeshStandardMaterial({
@@ -308,6 +379,25 @@ export function facadeMaterial(variant: number): MeshStandardMaterial {
       metalness: 0.08,
       vertexColors: true,
     });
+    m.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <uv_vertex>',
+        `#include <uv_vertex>
+         #ifdef USE_INSTANCING
+           // One sheet covers 8 floors of 3.25 m and 8 bays of 3.1 m.
+           vec2 facadeScale = vec2(
+             length(instanceMatrix[0].xyz) / 24.8,
+             length(instanceMatrix[1].xyz) / 26.0);
+           #ifdef USE_MAP
+             vMapUv *= facadeScale;
+           #endif
+           #ifdef USE_EMISSIVEMAP
+             vEmissiveMapUv *= facadeScale;
+           #endif
+         #endif`,
+      );
+    };
+    m.customProgramCacheKey = () => `facadeScaled${variant}`;
     return m;
   });
 }

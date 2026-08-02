@@ -171,7 +171,14 @@ export class TextureFactory {
     });
   }
 
-  /** Generic ground: soil and grass mottling, tinted per biome by vertex colour. */
+  /**
+   * Generic ground, tinted per biome by vertex colour.
+   *
+   * Turf is not a flat wash: it is clumps of blades at one scale, dry and lush
+   * patches at another, bare soil showing through where it is worn, and the
+   * odd stone. All four are here so that the terrain has something to look at
+   * at every distance.
+   */
   ground(): Texture {
     return this.memo('ground', () => {
       const size = 512;
@@ -181,18 +188,33 @@ export class TextureFactory {
         for (let x = 0; x < size; x++) {
           const i = (y * size + x) * 4;
           const patch = tileFbm(x / 60, y / 60, 9, 3, 4);
-          const blade = tileFbm(x / 3.5, y / 3.5, 146, 17, 2);
-          const soil = smoothstep(0.62, 0.82, patch);
-          const g = 0.55 + blade * 0.5 - patch * 0.18;
-          const r = lerp(g * 0.72, g * 1.18, soil);
-          const b = lerp(g * 0.45, g * 0.72, soil);
+          const clump = tileFbm(x / 13, y / 13, 40, 51, 3);
+          const blade = tileFbm(x / 3.2, y / 3.2, 160, 17, 2);
+          const fine = tileNoise(x / 1.5, y / 1.5, 341, 83);
+          const soil = smoothstep(0.60, 0.84, patch);
+          // Dry, yellower turf in the thinner patches.
+          const dry = smoothstep(0.42, 0.78, clump);
+          const g = clamp01(0.44 + blade * 0.44 + clump * 0.22 - patch * 0.16 + fine * 0.08);
+          let r = lerp(g * 0.66, g * 1.16, soil) * lerp(1, 1.22, dry);
+          let b = lerp(g * 0.40, g * 0.70, soil) * lerp(1, 0.82, dry);
           img.data[i] = clamp01(r) * 255;
-          img.data[i + 1] = clamp01(g) * 255;
+          img.data[i + 1] = clamp01(g * lerp(1, 0.95, dry)) * 255;
           img.data[i + 2] = clamp01(b) * 255;
           img.data[i + 3] = 255;
         }
       }
       ctx.putImageData(img, 0, 0);
+      // Small stones and bare scrapes worked into the turf.
+      for (let n = 0; n < 420; n++) {
+        const x = hashFloat(n, 11) * size;
+        const y = hashFloat(n, 12) * size;
+        const r = 0.8 + hashFloat(n, 13) * 2.6;
+        const l = 92 + hashFloat(n, 14) * 96;
+        ctx.fillStyle = `rgba(${l},${l * 0.96},${l * 0.87},${0.25 + hashFloat(n, 15) * 0.4})`;
+        ctx.beginPath();
+        ctx.ellipse(x, y, r, r * (0.55 + hashFloat(n, 16) * 0.7), hashFloat(n, 17) * 3.14, 0, 6.29);
+        ctx.fill();
+      }
       return finish(c);
     });
   }
@@ -203,14 +225,17 @@ export class TextureFactory {
       const h = new Float32Array(size * size);
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
-          h[y * size + x] = tileFbm(x / 4, y / 4, 64, 33, 3) * 0.8 + tileFbm(x / 26, y / 26, 10, 9, 2) * 0.4;
+          h[y * size + x] =
+            tileFbm(x / 3, y / 3, 84, 33, 3) * 0.85 +
+            tileFbm(x / 13, y / 13, 20, 51, 2) * 0.5 +
+            tileNoise(x / 1.4, y / 1.4, 180, 83) * 0.25;
         }
       }
-      return normalFromHeight(h, size, 1.6);
+      return normalFromHeight(h, size, 2.1);
     });
   }
 
-  /** Bare rock for cliffs and cuttings. */
+  /** Bare rock for cliffs and cuttings: bedded strata, broken by jointing. */
   rock(): Texture {
     return this.memo('rock', () => {
       const size = 512;
@@ -219,12 +244,19 @@ export class TextureFactory {
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
           const i = (y * size + x) * 4;
-          const strata = tileFbm(x / 90, y / 14, 6, 21, 3);
-          const crack = Math.abs(tileFbm(x / 22, y / 22, 24, 45, 3) - 0.5) * 2;
-          const v = clamp01(0.34 + strata * 0.4 + crack * 0.24);
-          img.data[i] = v * 168;
-          img.data[i + 1] = v * 158;
-          img.data[i + 2] = v * 146;
+          // Bedding planes run across; joints cut down through them.
+          const bed = tileFbm(x / 110, y / 9, 5, 21, 3);
+          const bedLine = smoothstep(0.42, 0.5, Math.abs(((y / 34 + bed * 1.4) % 1) - 0.5));
+          const joint = Math.abs(tileFbm(x / 26, y / 34, 20, 45, 3) - 0.5) * 2;
+          const grain = tileNoise(x / 2, y / 2, 256, 67);
+          const lichen = smoothstep(0.62, 0.86, tileFbm(x / 44, y / 44, 12, 7, 3));
+          let v = clamp01(0.28 + bed * 0.34 + joint * 0.3 + grain * 0.12 - bedLine * 0.16);
+          const r = v * 172;
+          const g = v * 162 * (1 + lichen * 0.12);
+          const b = v * 152 * (1 - lichen * 0.12);
+          img.data[i] = r;
+          img.data[i + 1] = g;
+          img.data[i + 2] = b;
           img.data[i + 3] = 255;
         }
       }
@@ -296,6 +328,64 @@ export class TextureFactory {
       }
       ctx.putImageData(img, 0, 0);
       return finish(c);
+    });
+  }
+
+  /**
+   * Tunnel lining: shuttered concrete, damp streaking down from the crown and
+   * soot worked into the pores by seventy years of trains.
+   */
+  tunnelLining(): Texture {
+    return this.memo('tunnelLining', () => {
+      const size = 512;
+      const { c, ctx } = canvas(size);
+      const img = ctx.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          // Shutter boards run round the bore: bands across the U direction.
+          const board = smoothstep(0.0, 0.06, Math.abs(((x % 96) / 96) - 0.5) * 2 - 0.9);
+          const grain = tileNoise(x / 2.6, y / 2.6, 100, 17);
+          const damp = tileFbm(x / 26, y / 90, 12, 61, 4);
+          const soot = tileFbm(x / 70, y / 44, 8, 29, 3);
+          const streak = clamp01(smoothstep(0.52, 0.92, damp) * 0.8);
+          let v = 0.62 + grain * 0.1 - soot * 0.26 - board * 0.28;
+          v = clamp01(v - streak * 0.22);
+          const green = 1 - streak * 0.06;
+          img.data[i] = v * 206;
+          img.data[i + 1] = v * 204 * green;
+          img.data[i + 2] = v * 196 * (1 - streak * 0.02);
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      // Efflorescence: pale calcium bloom where water has run.
+      for (let n = 0; n < 90; n++) {
+        const x = hashFloat(n, 3, 9) * size;
+        const y = hashFloat(n, 4, 9) * size;
+        const w = 4 + hashFloat(n, 5, 9) * 16;
+        const h = 30 + hashFloat(n, 6, 9) * 150;
+        const grad = ctx.createLinearGradient(x, y, x, y + h);
+        grad.addColorStop(0, 'rgba(232,230,220,0.34)');
+        grad.addColorStop(1, 'rgba(232,230,220,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(x, y, w, h);
+      }
+      return finish(c);
+    });
+  }
+
+  tunnelLiningNormal(): Texture {
+    return this.memo('tunnelLiningN', () => {
+      const size = 256;
+      const h = new Float32Array(size * size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const board = Math.abs(((x % 48) / 48) - 0.5) * 2 > 0.9 ? -0.5 : 0;
+          h[y * size + x] = tileFbm(x / 3, y / 3, 84, 17, 3) * 0.5 + board;
+        }
+      }
+      return normalFromHeight(h, size, 1.5);
     });
   }
 
@@ -557,7 +647,13 @@ export class TextureFactory {
     });
   }
 
-  /** Foliage card: a cluster of leaves with alpha, used for canopy planes. */
+  /**
+   * Foliage card: a cluster of leaves with alpha, used for canopy planes.
+   *
+   * Two things sell a tree at this scale - a silhouette that is ragged rather
+   * than a disc, and light falling through the outer leaves while the inside
+   * of the crown stays dark. Both are painted in here.
+   */
   leafCluster(tint: number): Texture {
     return this.memo(`leaf${tint}`, () => {
       const size = 256;
@@ -566,17 +662,50 @@ export class TextureFactory {
       const r = (tint >> 16) & 255;
       const g = (tint >> 8) & 255;
       const b = tint & 255;
-      for (let n = 0; n < 260; n++) {
-        const a = hashFloat(n, 1, tint) * Math.PI * 2;
-        const rad = Math.pow(hashFloat(n, 2, tint), 0.6) * size * 0.46;
-        const x = size / 2 + Math.cos(a) * rad;
-        const y = size / 2 + Math.sin(a) * rad * 0.86;
-        const s = 8 + hashFloat(n, 3, tint) * 20;
-        const shade = 0.72 + hashFloat(n, 4, tint) * 0.42 - rad / size * 0.45;
-        ctx.fillStyle = `rgba(${r * shade},${g * shade},${b * shade},0.95)`;
+
+      // A few twigs showing through the gaps.
+      ctx.strokeStyle = 'rgba(58,46,34,0.75)';
+      for (let n = 0; n < 14; n++) {
+        const a = hashFloat(n, 40, tint) * 6.283;
+        const len = size * (0.14 + hashFloat(n, 41, tint) * 0.2);
+        ctx.lineWidth = 1 + hashFloat(n, 42, tint) * 1.6;
         ctx.beginPath();
-        ctx.ellipse(x, y, s, s * (0.5 + hashFloat(n, 5, tint) * 0.5), hashFloat(n, 6, tint) * 6.28, 0, 6.29);
-        ctx.fill();
+        ctx.moveTo(size / 2, size * 0.5);
+        ctx.lineTo(size / 2 + Math.cos(a) * len, size * 0.5 + Math.sin(a) * len);
+        ctx.stroke();
+      }
+
+      // Clumps of leaves hanging off a few main limbs, so the mass breaks up
+      // into lobes with sky showing between them.
+      const lobes = 7;
+      for (let l = 0; l < lobes; l++) {
+        const la = (l / lobes) * 6.283 + hashFloat(l, 20, tint) * 0.7;
+        const lr = size * (0.16 + hashFloat(l, 21, tint) * 0.26);
+        const lx = size / 2 + Math.cos(la) * lr;
+        const ly = size * 0.46 + Math.sin(la) * lr * 0.82;
+        const leaves = 34 + Math.floor(hashFloat(l, 22, tint) * 26);
+        for (let n = 0; n < leaves; n++) {
+          const a = hashFloat(n, l * 7 + 1, tint) * 6.283;
+          const rad = Math.pow(hashFloat(n, l * 7 + 2, tint), 0.55) * size * 0.19;
+          const x = lx + Math.cos(a) * rad;
+          const y = ly + Math.sin(a) * rad * 0.9;
+          const s = 4 + hashFloat(n, l * 7 + 3, tint) * 11;
+          const fromCentre = Math.hypot(x - size / 2, y - size * 0.46) / size;
+          // Lit at the edge of the mass, deep shade towards the middle.
+          // Kept below one: the card is tinted per instance, so a texel that
+          // reaches white throws the tree's colour away entirely.
+          const shade = clamp01(0.32 + fromCentre * 0.95 + hashFloat(n, l * 7 + 4, tint) * 0.24);
+          const hue = 0.9 + hashFloat(n, l * 7 + 6, tint) * 0.24;
+          ctx.fillStyle = `rgba(${r * shade * hue},${g * shade},${b * shade * (2 - hue)},${
+            0.82 + hashFloat(n, l * 7 + 7, tint) * 0.18
+          })`;
+          ctx.beginPath();
+          ctx.ellipse(
+            x, y, s, s * (0.42 + hashFloat(n, l * 7 + 5, tint) * 0.5),
+            hashFloat(n, l * 7 + 8, tint) * 6.28, 0, 6.29,
+          );
+          ctx.fill();
+        }
       }
       return finish(c, true, false);
     });
@@ -612,11 +741,13 @@ export class TextureFactory {
       const r = (color >> 16) & 255;
       const g = (color >> 8) & 255;
       const b = color & 255;
-      for (let n = 0; n < 46; n++) {
+      for (let n = 0; n < 64; n++) {
         const x = hashFloat(n, 1, color) * size;
-        const hgt = size * (0.45 + hashFloat(n, 2, color) * 0.5);
+        const hgt = size * (0.4 + hashFloat(n, 2, color) * 0.55);
         const lean = (hashFloat(n, 3, color) - 0.5) * 34;
-        const shade = 0.78 + hashFloat(n, 4, color) * 0.38;
+        // Blades are shaded below white so the tuft keeps the colour it is
+        // given, and so the base of the clump reads darker than the tips.
+        const shade = 0.46 + hashFloat(n, 4, color) * 0.42;
         ctx.strokeStyle = `rgba(${r * shade},${g * shade},${b * shade},0.95)`;
         ctx.lineWidth = 1.4 + hashFloat(n, 5, color) * 2.2;
         ctx.beginPath();

@@ -344,6 +344,9 @@ export function createCar(options: CarOptions): CarModel {
   return { group, headlights, taillights, interiorLights, pantograph };
 }
 
+/** Angle the wiper rests at when it is not sweeping: laid along the bottom. */
+export const WIPER_PARK = -1.34;
+
 /**
  * The driving cab, modelled from the driver's seat outwards: desk, handles,
  * window frames and the dark interior that frames the view of the line.
@@ -506,20 +509,24 @@ export function createCab(carLength: number): CabModel {
   brakeHandle.position.set(0.62, 1.92, front + 0.46);
   group.add(brakeHandle);
 
-  // Windscreen wiper, parked at the bottom of the glass.
+  // Windscreen wiper, parked along the bottom of the glass where it belongs -
+  // stood up across the screen it reads as a girder through the view.
   const wiper = new Group();
   const wiperBuilder = new MeshBuilder();
-  const blade = new Matrix4().makeScale(0.035, 1.1, 0.035);
+  const blade = new Matrix4().makeScale(0.026, 1.05, 0.026);
   blade.setPosition(0, 0.5, 0);
   wiperBuilder.add(unitBox(), blade, new Color(0.09, 0.09, 0.1));
+  const arm = new Matrix4().makeScale(0.04, 0.34, 0.04);
+  arm.setPosition(0, 0.17, -0.03);
+  wiperBuilder.add(unitBox(), arm, new Color(0.14, 0.14, 0.15));
   const wiperMesh = wiperBuilder.toMesh(
     new MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }),
     false,
     'wiper',
   );
   if (wiperMesh) wiper.add(wiperMesh);
-  wiper.position.set(-0.5, 1.98, front + 0.16);
-  wiper.rotation.z = -0.62;
+  wiper.position.set(-0.62, 1.72, front + 0.16);
+  wiper.rotation.z = WIPER_PARK;
   group.add(wiper);
 
   return {

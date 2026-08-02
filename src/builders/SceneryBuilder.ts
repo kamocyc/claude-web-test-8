@@ -1,8 +1,10 @@
-import { BufferAttribute, BufferGeometry, Color, Matrix4, Mesh, Vector3 } from 'three';
+import { BufferAttribute, Color, Matrix4, Mesh, Vector3 } from 'three';
 import { InstanceCollector, MeshBuilder, addConstantAttribute } from './MeshBuilder';
 import {
   asphaltMaterial,
+  broadleafCanopy,
   broadleafMaterial,
+  coniferCrown,
   coniferMaterial,
   concreteMaterial,
   crossCards,
@@ -11,7 +13,6 @@ import {
   grassMaterial,
   hipRoof,
   makeInstanced,
-  mergeGeometries,
   metalMaterial,
   paddyMaterial,
   plainMaterial,
@@ -68,31 +69,14 @@ function scatterLateral(ctx: ChunkContext, min: number, max: number): number {
   return side * lerp(min, max, t);
 }
 
-let coniferCrownGeo: BufferGeometry | null = null;
-function coniferCrown(): BufferGeometry {
-  if (!coniferCrownGeo) {
-    const parts: BufferGeometry[] = [];
-    const tiers = [
-      { y: 0.0, r: 1.0, h: 0.5 },
-      { y: 0.32, r: 0.78, h: 0.44 },
-      { y: 0.62, r: 0.52, h: 0.42 },
-    ];
-    for (const tier of tiers) {
-      const cone = unitCone(7).clone();
-      cone.scale(tier.r, tier.h, tier.r);
-      cone.translate(0, tier.y, 0);
-      parts.push(cone);
-    }
-    coniferCrownGeo = mergeGeometries(parts);
-  }
-  return coniferCrownGeo;
-}
+/** Number of crown shapes generated per species, to break up cloning. */
+const TREE_VARIANTS = 3;
 
 /** Trees, in two species groups, plus lineside scrub. */
 export function buildVegetation(ctx: ChunkContext): void {
   const trunks = new InstanceCollector();
-  const conifers = new InstanceCollector();
-  const broadleaves = new InstanceCollector();
+  const conifers = [new InstanceCollector(), new InstanceCollector(), new InstanceCollector()];
+  const broadleaves = [new InstanceCollector(), new InstanceCollector(), new InstanceCollector()];
   const matrix = new Matrix4();
   const scale = new Vector3();
   const color = new Color();
@@ -108,9 +92,11 @@ export function buildVegetation(ctx: ChunkContext): void {
     if (p.sample.stationZone > 0.35 && Math.abs(lateral) < 55) continue;
 
     const density = blendedAttr(p.sample.weights, 'treeDensity');
-    // Woodland grows in patches rather than evenly.
-    const patch = ctx.field.noise.scatter.fbm(p.x * 0.0035, p.z * 0.0035, 3) * 0.5 + 0.5;
-    const chance = clamp01(density * (0.18 + patch * 1.05)) * 0.85;
+    // Woodland grows in stands with open ground between them, not as an even
+    // sprinkle: squaring the patch weight is what separates the two.
+    const patch = clamp01(ctx.field.noise.scatter.fbm(p.x * 0.0035, p.z * 0.0035, 3) * 0.5 + 0.5);
+    const stand = patch * patch * (3 - 2 * patch);
+    const chance = clamp01(density * (0.06 + stand * 1.5)) * 0.9;
     if (!ctx.rng.chance(chance)) continue;
 
     const mountainish =
@@ -134,15 +120,36 @@ export function buildVegetation(ctx: ChunkContext): void {
     trackMatrix(p.sample, lateral, baseY, matrix, ctx.rng.range(0, 6.28), scale);
 
     const seasonal = ctx.field.noise.patches.fbm(p.x * 0.0008, p.z * 0.0008, 2);
+    const variant = ctx.rng.int(0, TREE_VARIANTS - 1);
     if (conifer) {
-      color.setRGB(0.20, 0.36, 0.17).multiplyScalar(ctx.rng.range(0.8, 1.28));
+      color.setRGB(0.14, 0.26, 0.13).multiplyScalar(ctx.rng.range(0.72, 1.35));
       color.offsetHSL(seasonal * 0.03, 0, 0);
-      conifers.push(matrix, color);
+      conifers[variant].push(matrix, color);
     } else {
-      color.setRGB(0.42, 0.60, 0.30).multiplyScalar(ctx.rng.range(0.75, 1.3));
-      color.offsetHSL(seasonal * 0.06, seasonal * 0.1, 0);
-      broadleaves.push(matrix, color);
+      color.setRGB(0.30, 0.45, 0.21).multiplyScalar(ctx.rng.range(0.7, 1.36));
+      color.offsetHSL(seasonal * 0.06, seasonal * 0.12, 0);
+      broadleaves[variant].push(matrix, color);
     }
+  }
+
+  // Scrub under and around the stands, which is what stops a wood ending in
+  // mid air at the trunk line.
+  const bushAttempts = Math.round(220 * ctx.profile.sceneryDensity);
+  for (let i = 0; i < bushAttempts; i++) {
+    const s = ctx.rng.range(ctx.sStart, ctx.sEnd);
+    const lateral = scatterLateral(ctx, 13, 260);
+    const p = place(ctx, s, lateral);
+    if (!p || p.y < 0.8) continue;
+    if (p.sample.structure !== 0 && Math.abs(lateral) < 30) continue;
+    if (p.sample.stationZone > 0.35 && Math.abs(lateral) < 55) continue;
+    const patch = clamp01(ctx.field.noise.scatter.fbm(p.x * 0.0035, p.z * 0.0035, 3) * 0.5 + 0.5);
+    const shrubs = blendedAttr(p.sample.weights, 'shrubDensity');
+    if (!ctx.rng.chance(clamp01(shrubs * (0.2 + patch * 0.9)) * 0.7)) continue;
+    const size = ctx.rng.range(1.1, 2.9);
+    scale.set(size * ctx.rng.range(0.9, 1.4), size * 0.8, size * ctx.rng.range(0.9, 1.4));
+    trackMatrix(p.sample, lateral, p.y - p.sample.y, matrix, ctx.rng.range(0, 6.28), scale);
+    color.setRGB(0.24, 0.36, 0.17).multiplyScalar(ctx.rng.range(0.7, 1.3));
+    broadleaves[ctx.rng.int(0, TREE_VARIANTS - 1)].push(matrix, color);
   }
 
   const trunkMesh = makeInstanced(taperedCylinder(0.55, 6), trunkMaterial(), trunks, {
@@ -151,17 +158,18 @@ export function buildVegetation(ctx: ChunkContext): void {
   });
   if (trunkMesh) ctx.group.add(trunkMesh);
 
-  const coniferMesh = makeInstanced(coniferCrown(), coniferMaterial(), conifers, {
-    castShadow: true,
-    name: 'conifers',
-  });
-  if (coniferMesh) ctx.group.add(coniferMesh);
-
-  const broadleafMesh = makeInstanced(crossCards(3), broadleafMaterial(), broadleaves, {
-    castShadow: true,
-    name: 'broadleaves',
-  });
-  if (broadleafMesh) ctx.group.add(broadleafMesh);
+  for (let v = 0; v < TREE_VARIANTS; v++) {
+    const coniferMesh = makeInstanced(coniferCrown(v), coniferMaterial(), conifers[v], {
+      castShadow: true,
+      name: `conifers-${v}`,
+    });
+    if (coniferMesh) ctx.group.add(coniferMesh);
+    const broadleafMesh = makeInstanced(broadleafCanopy(v), broadleafMaterial(), broadleaves[v], {
+      castShadow: true,
+      name: `broadleaves-${v}`,
+    });
+    if (broadleafMesh) ctx.group.add(broadleafMesh);
+  }
 }
 
 /** Grass tufts and weeds along the cess, only close to the camera. */
@@ -172,24 +180,35 @@ export function buildGroundCover(ctx: ChunkContext): void {
   const scale = new Vector3();
   const color = new Color();
 
-  const attempts = Math.round(520 * ctx.profile.sceneryDensity);
+  const attempts = Math.round(900 * ctx.profile.sceneryDensity);
   for (let i = 0; i < attempts; i++) {
     const s = ctx.rng.range(ctx.sStart, ctx.sEnd);
-    const lateral = scatterLateral(ctx, 6.2, 46);
+    const lateral = scatterLateral(ctx, 5.9, 44);
     const p = place(ctx, s, lateral);
     if (!p || p.y < 0.4) continue;
     if (p.sample.structure !== 0) continue;
     const shrub = blendedAttr(p.sample.weights, 'shrubDensity');
-    if (!ctx.rng.chance(clamp01(shrub * 0.85))) continue;
-    const size = ctx.rng.range(0.5, 1.5);
-    scale.set(size * 1.5, size, size * 1.5);
+    // Weeds grow thickest right at the edge of the ballast, where nothing
+    // walks on them and the drainage is good.
+    const cess = 1 + 0.9 * (1 - clamp01((Math.abs(lateral) - 6) / 8));
+    if (!ctx.rng.chance(clamp01(shrub * 0.8 * cess))) continue;
+    // Lineside weeds are knee high, not waist high: oversized tufts read as
+    // cardboard cut-outs standing in the grass.
+    const size = ctx.rng.range(0.3, 0.95);
+    scale.set(size * 1.7, size * ctx.rng.range(0.8, 1.4), size * 1.7);
     trackMatrix(p.sample, lateral, p.y - p.sample.y, matrix, ctx.rng.range(0, 6.28), scale);
-    const shade = ctx.rng.range(0.65, 1.25);
-    color.setRGB(0.48 * shade, 0.62 * shade, 0.26 * shade);
+    const shade = ctx.rng.range(0.6, 1.3);
+    // The odd bleached, seeded head among the green.
+    const dry = ctx.rng.chance(0.16) ? 1 : 0;
+    color.setRGB(
+      lerp(0.34, 0.62, dry) * shade,
+      lerp(0.5, 0.58, dry) * shade,
+      lerp(0.18, 0.26, dry) * shade,
+    );
     tufts.push(matrix, color);
   }
 
-  const mesh = makeInstanced(crossCards(2), grassMaterial(), tufts, { name: 'grass' });
+  const mesh = makeInstanced(crossCards(3), grassMaterial(), tufts, { name: 'grass' });
   if (mesh) ctx.group.add(mesh);
 }
 
@@ -200,6 +219,7 @@ export function buildBuildings(ctx: ChunkContext): void {
   const bodies = new Map<string, InstanceCollector>();
   const roofs = new InstanceCollector();
   const hipRoofs = new InstanceCollector();
+  const signs = new InstanceCollector();
   const matrix = new Matrix4();
   const scale = new Vector3();
   const color = new Color();
@@ -248,6 +268,32 @@ export function buildBuildings(ctx: ChunkContext): void {
         trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
         color.setHSL(ctx.rng.range(0.55, 0.65), ctx.rng.range(0.06, 0.3), ctx.rng.range(0.2, 0.42));
         roofs.push(matrix, color);
+        // Entrance canopy, a balcony on the upper floor, and the block wall
+        // that surrounds every Japanese plot.
+        scale.set(w * 0.42, 0.16, 1.5);
+        trackMatrix(p.sample, lateral, baseY + 2.25, matrix, yaw, scale);
+        matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.6) / 1.5));
+        collector('concrete').push(matrix, new Color(0.62, 0.6, 0.57));
+        if (h > 4.5) {
+          scale.set(w * 0.8, 1.05, 0.12);
+          trackMatrix(p.sample, lateral, baseY + h * 0.52, matrix, yaw, scale);
+          matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.06) / 0.12));
+          collector('concrete').push(matrix, new Color(0.78, 0.77, 0.74));
+        }
+        if (ctx.rng.chance(0.7)) {
+          const wallColor = new Color(0.7, 0.69, 0.65);
+          const hw = w * 0.5 + 2.2;
+          const hd = d * 0.5 + 2.2;
+          for (const [ox, oz, sx, sz] of [
+            [-hw, 0, 0.22, hd * 2], [hw, 0, 0.22, hd * 2],
+            [0, -hd, hw * 2, 0.22], [0, hd, hw * 2, 0.22],
+          ] as [number, number, number, number][]) {
+            scale.set(sx, 1.5, sz);
+            trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+            matrix.multiply(new Matrix4().makeTranslation(ox / sx, 0, oz / sz));
+            collector('concrete').push(matrix, wallColor);
+          }
+        }
         break;
       }
       case 'farmhouse': {
@@ -272,6 +318,15 @@ export function buildBuildings(ctx: ChunkContext): void {
         trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.8, 1.05));
         collector(`facade${ctx.rng.int(0, 4)}`).push(matrix, color);
+        // Shop front: an awning over the pavement and a signboard standing up
+        // the corner of the building.
+        scale.set(w + 0.5, 0.3, 1.6);
+        trackMatrix(p.sample, lateral, baseY + 3.1, matrix, yaw, scale);
+        collector('metal').push(matrix, new Color(0.5, 0.2, 0.18));
+        scale.set(0.9, h * 0.55, 0.35);
+        trackMatrix(p.sample, lateral, baseY + h * 0.36, matrix, yaw, scale);
+        matrix.multiply(new Matrix4().makeTranslation((w * 0.5 - 0.6) / 0.9, 0, (d * 0.5 + 0.2) / 0.35));
+        signs.push(matrix, new Color().setHSL(ctx.rng.next(), 0.62, 0.52));
         break;
       }
       case 'block': {
@@ -282,10 +337,19 @@ export function buildBuildings(ctx: ChunkContext): void {
         trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.78, 1.06));
         collector(`facade${ctx.rng.int(0, 4)}`).push(matrix, color);
-        // Roof-top plant.
+        // Roof-top plant behind a parapet, and a water tank on legs.
         scale.set(w * 0.3, 1.8, d * 0.3);
         trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
         collector('concrete').push(matrix, new Color(0.72, 0.72, 0.7));
+        scale.set(w + 0.4, 0.9, d + 0.4);
+        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
+        collector('concrete').push(matrix, new Color(0.76, 0.75, 0.72));
+        if (ctx.rng.chance(0.5)) {
+          scale.set(2.6, 1.5, 2.0);
+          trackMatrix(p.sample, lateral, baseY + h + 1.9, matrix, yaw, scale);
+          matrix.multiply(new Matrix4().makeTranslation((w * 0.26) / 2.6, 0, (d * 0.26) / 2.0));
+          collector('metal').push(matrix, new Color(0.78, 0.78, 0.76));
+        }
         break;
       }
       case 'tower': {
@@ -299,6 +363,12 @@ export function buildBuildings(ctx: ChunkContext): void {
         scale.set(w * 0.55, 3.2, d * 0.55);
         trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
         collector('concrete').push(matrix, new Color(0.66, 0.66, 0.65));
+        scale.set(w + 0.5, 1.1, d + 0.5);
+        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
+        collector('concrete').push(matrix, new Color(0.7, 0.7, 0.69));
+        scale.set(0.24, 6.5, 0.24);
+        trackMatrix(p.sample, lateral, baseY + h + 3.2, matrix, yaw, scale);
+        collector('metal').push(matrix, new Color(0.8, 0.5, 0.45));
         break;
       }
       case 'warehouse': {
@@ -312,6 +382,11 @@ export function buildBuildings(ctx: ChunkContext): void {
         scale.set(w + 0.7, 0.5, d + 0.7);
         trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
         collector('metal').push(matrix, color.clone().multiplyScalar(0.85));
+        // Roller shutter across the gable end.
+        scale.set(w * 0.34, h * 0.62, 0.25);
+        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.1) / 0.25));
+        collector('metal').push(matrix, new Color(0.55, 0.56, 0.58));
         break;
       }
     }
@@ -341,6 +416,11 @@ export function buildBuildings(ctx: ChunkContext): void {
     name: 'hip-roofs',
   });
   if (hipMesh) ctx.group.add(hipMesh);
+  const signMesh = makeInstanced(unitBox(), plainMaterial(), signs, {
+    castShadow: true,
+    name: 'shop-signs',
+  });
+  if (signMesh) ctx.group.add(signMesh);
 }
 
 function pickBuildingKind(
@@ -652,6 +732,64 @@ export function buildWaterways(ctx: ChunkContext): void {
   ctx.group.add(mesh);
 }
 
+/**
+ * Concrete cable troughing along the cess.
+ *
+ * It runs beside every electrified line there is, and from the cab it is the
+ * thing the eye follows into the distance, so it does more for the look of the
+ * lineside than anything else of its size.
+ */
+function buildCableRoute(ctx: ChunkContext): void {
+  const builder = new MeshBuilder();
+  const lat = -6.35;
+  // Half section of a trough with its lid: (lateral offset, height).
+  const section: [number, number][] = [
+    [-0.3, 0], [-0.3, 0.34], [-0.34, 0.34], [-0.34, 0.42],
+    [0.34, 0.42], [0.34, 0.34], [0.3, 0.34], [0.3, 0],
+  ];
+  const body = new Color(0.62, 0.61, 0.58);
+  const lid = new Color(0.7, 0.69, 0.66);
+  const colors = section.map(([, h]) => (h > 0.36 ? lid : body));
+  const uvU = section.map((_, i) => i / section.length);
+
+  let rows: Vector3[][] = [];
+  let uvV: number[] = [];
+  const flush = () => {
+    if (rows.length > 1) builder.addSweep(rows, colors, uvV, uvU, false);
+    rows = [];
+    uvV = [];
+  };
+
+  for (let s = ctx.sStart; s <= ctx.sEnd + 0.01; s += 2.5) {
+    const p = place(ctx, s, lat);
+    if (!p || p.sample.structure !== 0 || p.sample.stationZone > 0.6) {
+      flush();
+      continue;
+    }
+    const base = p.y - p.sample.y - 0.06;
+    const row: Vector3[] = [];
+    for (const [dl, h] of section) {
+      row.push(trackPointAt(p.sample, lat + dl, base + h));
+    }
+    rows.push(row);
+    uvV.push(s * 0.5);
+  }
+  flush();
+
+  const mesh = builder.toMesh(concreteMaterial(), true, 'cable-route');
+  if (mesh) {
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    ctx.group.add(mesh);
+  }
+}
+
+function trackPointAt(sample: TrackSample, lateral: number, height: number): Vector3 {
+  const rx = -Math.sin(sample.heading);
+  const rz = Math.cos(sample.heading);
+  return new Vector3(sample.x + rx * lateral, sample.y + height, sample.z + rz * lateral);
+}
+
 /** Boundary fences, relay cabinets, rocks and other small lineside clutter. */
 export function buildLinesideDetail(ctx: ChunkContext): void {
   const builder = new MeshBuilder();
@@ -659,6 +797,8 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
   const scale = new Vector3();
   const grey = new Color(0.66, 0.66, 0.64);
   const green = new Color(0.32, 0.4, 0.34);
+
+  buildCableRoute(ctx);
 
   const first = ctx.samples[0];
   const built = blendedAttr(first.weights, 'buildingDensity');
@@ -680,13 +820,35 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
     }
   }
 
-  // Relay cabinets every few hundred metres.
+  // Relay cabinets every few hundred metres, on a plinth.
   for (let s = Math.ceil(ctx.sStart / 180) * 180; s < ctx.sEnd; s += 180) {
     const p = place(ctx, s, -8.4);
     if (!p || p.sample.structure !== 0) continue;
+    scale.set(1.15, 0.16, 0.85);
+    trackMatrix(p.sample, -8.4, p.y - p.sample.y - 0.05, matrix, 0, scale);
+    builder.add(unitBox(), matrix, grey);
     scale.set(0.9, 1.3, 0.6);
-    trackMatrix(p.sample, -8.4, p.y - p.sample.y, matrix, 0, scale);
+    trackMatrix(p.sample, -8.4, p.y - p.sample.y + 0.11, matrix, 0, scale);
     builder.add(unitBox(), matrix, green);
+    scale.set(1.0, 0.08, 0.7);
+    trackMatrix(p.sample, -8.4, p.y - p.sample.y + 1.41, matrix, 0, scale);
+    builder.add(unitBox(), matrix, green);
+  }
+
+  // Distance posts: a marker every hundred metres, taller at each kilometre.
+  const post = new Color(0.88, 0.87, 0.83);
+  for (let s = Math.ceil(ctx.sStart / 100) * 100; s < ctx.sEnd; s += 100) {
+    const p = place(ctx, s, 7.4);
+    if (!p || p.sample.structure !== 0) continue;
+    const whole = Math.abs(s % 1000) < 1;
+    scale.set(0.16, whole ? 1.35 : 0.8, 0.16);
+    trackMatrix(p.sample, 7.4, p.y - p.sample.y, matrix, 0, scale);
+    builder.add(unitBox(), matrix, post);
+    if (whole) {
+      scale.set(0.44, 0.34, 0.07);
+      trackMatrix(p.sample, 7.4, p.y - p.sample.y + 1.05, matrix, 0, scale);
+      builder.add(unitBox(), matrix, post);
+    }
   }
 
   const mesh = builder.toMesh(metalMaterial(), false, 'lineside');
@@ -704,6 +866,7 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
     const lateral = scatterLateral(ctx, 12, 220);
     const p = place(ctx, s, lateral);
     if (!p) continue;
+    if (p.sample.structure !== 0 && Math.abs(lateral) < 26) continue;
     const rocky =
       p.sample.weights[BIOME_INDEX.mountain] * 1.2 + p.sample.weights[BIOME_INDEX.coast] * 0.9;
     if (!ctx.rng.chance(clamp01(rocky * 0.5))) continue;

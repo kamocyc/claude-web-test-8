@@ -30,9 +30,11 @@ interface TileLevel {
 const LEVELS: TileLevel[] = [
   { size: 128, segments: 32, radius: 3 },
   { size: 256, segments: 32, radius: 3 },
-  { size: 512, segments: 24, radius: 3 },
-  { size: 1024, segments: 16, radius: 3 },
-  { size: 2048, segments: 12, radius: 3 },
+  { size: 512, segments: 32, radius: 3 },
+  { size: 1024, segments: 24, radius: 3 },
+  // Coarse enough and a distant ridge turns into a row of facets against the
+  // sky, which is the first thing that gives a generated landscape away.
+  { size: 2048, segments: 16, radius: 3 },
 ];
 
 interface Tile {
@@ -251,9 +253,10 @@ export class TerrainTiles {
       }
     }
 
-    // Skirt: duplicate the border ring, dropped by a couple of cells, so
-    // neighbouring tiles of a coarser level cannot show a gap.
-    const drop = step * 2.2 + 1.5;
+    // Skirt: duplicate the border ring, dropped far enough to cover the height
+    // a coarser neighbour can miss over one of its cells - and no further. A
+    // deep skirt hangs out of every hillside as a dark flap.
+    const drop = step * 0.45 + 0.8;
     let sv = gridVerts;
     const addSkirt = (i: number, j: number): number => {
       const src = j * (segments + 1) + i;

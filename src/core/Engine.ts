@@ -98,7 +98,9 @@ export class Engine {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = PCFShadowMap;
     this.renderer.toneMapping = ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.95;
+    // A touch under one: the daylight sun is bright enough to clip greens to a
+    // pale wash at unity exposure, which drains the colour out of the land.
+    this.renderer.toneMappingExposure = 0.82;
     this.renderer.info.autoReset = true;
 
     this.camera = new PerspectiveCamera(

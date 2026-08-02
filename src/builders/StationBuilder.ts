@@ -109,16 +109,55 @@ function buildStation(ctx: ChunkContext, station: StationInfo): void {
       metal.add(unitBox(), matrix, steel);
     }
 
-    // Benches and lamp posts.
+    // Benches, with a back, and lamp posts.
     for (let i = 0; i < 3; i++) {
       const s = station.s - half * 0.6 + (i * half * 0.6);
       const sample = ctx.track.sampleAt(s);
+      const timber = new Color(0.55, 0.42, 0.3);
       scale.set(0.5, 0.45, 1.8);
       trackMatrix(sample, outer - side * 1.0, PLATFORM_HEIGHT - 0.9, matrix, 0, scale);
-      structure.add(unitBox(), matrix, new Color(0.55, 0.42, 0.3));
+      structure.add(unitBox(), matrix, timber);
+      scale.set(0.1, 0.55, 1.8);
+      trackMatrix(sample, outer - side * 0.78, PLATFORM_HEIGHT - 0.45, matrix, 0, scale);
+      structure.add(unitBox(), matrix, timber);
       scale.set(0.12, 3.6, 0.12);
       trackMatrix(sample, outer - side * 0.6, PLATFORM_HEIGHT - 0.9, matrix, 0, scale);
       metal.add(unitBox(), matrix, steel);
+    }
+
+    // A drinks machine and a notice board: the two things that are on every
+    // platform in the country.
+    const kioskSample = ctx.track.sampleAt(station.s + half * 0.3);
+    scale.set(0.72, 1.85, 1.2);
+    trackMatrix(kioskSample, outer - side * 0.85, PLATFORM_HEIGHT - 0.9, matrix, 0, scale);
+    structure.add(unitBox(), matrix, new Color(0.72, 0.14, 0.13));
+    scale.set(0.12, 1.15, 1.05);
+    trackMatrix(kioskSample, outer - side * 1.28, PLATFORM_HEIGHT - 0.32, matrix, 0, scale);
+    structure.add(unitBox(), matrix, new Color(0.86, 0.87, 0.9));
+    const boardSample = ctx.track.sampleAt(station.s - half * 0.3);
+    scale.set(0.1, 1.15, 2.0);
+    trackMatrix(boardSample, outer - side * 0.4, PLATFORM_HEIGHT - 0.05, matrix, 0, scale);
+    structure.add(unitBox(), matrix, new Color(0.9, 0.9, 0.87));
+    for (const legOffset of [-0.8, 0.8]) {
+      scale.set(0.07, 1.0, 0.07);
+      trackMatrix(
+        ctx.track.sampleAt(station.s - half * 0.3 + legOffset),
+        outer - side * 0.4,
+        PLATFORM_HEIGHT - 0.9,
+        matrix, 0, scale,
+      );
+      metal.add(unitBox(), matrix, steel);
+    }
+
+    // Rural platforms get a waiting shelter instead of a full canopy.
+    if (!station.hasCanopy) {
+      const shelterSample = ctx.track.sampleAt(station.s);
+      scale.set(2.4, 2.3, 4.0);
+      trackMatrix(shelterSample, outer - side * 1.4, PLATFORM_HEIGHT - 0.9, matrix, 0, scale);
+      structure.add(unitBox(), matrix, new Color(0.86, 0.85, 0.8));
+      scale.set(3.0, 0.2, 4.6);
+      trackMatrix(shelterSample, outer - side * 1.4, PLATFORM_HEIGHT + 1.4, matrix, 0, scale);
+      structure.add(unitBox(), matrix, roofColor);
     }
   }
 
