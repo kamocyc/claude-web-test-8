@@ -61,10 +61,12 @@ Six views: the cab, a passenger window looking out sideways, a chase camera, a
 fixed lineside camera that picks a new spot for each pass, the nose, and the
 roof.
 
-**Automatic driving** (`F`) hands the train to an ATO that works to a target
-speed built from the line limit ahead and the braking curve to the next
-stopping mark, moving a notch at a time so the ride stays smooth. Touching any
-handle takes control back.
+**Automatic driving** (`F`) hands the train to an ATO that works out the
+deceleration the road ahead actually calls for — the stopping mark, a
+restriction coming up, the line limit — and picks the brake notch that produces
+it, moving a notch at a time so the ride stays smooth. It brings the train to a
+stand within half a metre of the marker. Touching any handle takes control
+back.
 
 **Skip to the next landscape** (`B`) runs the service forward to wherever the
 line next changes character — out of the forest and onto the coast, say —

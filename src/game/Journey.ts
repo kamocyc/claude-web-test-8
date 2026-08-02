@@ -57,11 +57,14 @@ export class Journey {
     public readonly startTime: number,
   ) {}
 
-  /** The station the train is working towards. */
-  nextStation(position: number): StationInfo | null {
+  /**
+   * The station the train is working towards: the first one it has not yet
+   * served. A station that has been served is finished with, even while the
+   * train is still standing alongside its platform.
+   */
+  nextStation(_position: number): StationInfo | null {
     for (const station of this.track.stations) {
       if (!station.served) return station;
-      if (station.s + 60 > position) return station;
     }
     return null;
   }
@@ -127,8 +130,11 @@ export class Journey {
     switch (this.phase) {
       case 'running': {
         const error = train.position - stopPositionFor(station);
-        const stopped = Math.abs(train.speed) < 0.12 && train.brakeOutput > 0.15;
-        if (stopped && Math.abs(error) < 22) {
+        const stopped = Math.abs(train.speed) < 0.12 && train.brakeOutput > 0.05;
+        // The arrival window reaches as far as the run-through threshold, so a
+        // train that has come to a stand alongside the platform always either
+        // arrives or is booked for running through - never neither.
+        if (stopped && error < 40 && error > -22) {
           this.completeStop(station, error, now, setMessage);
         } else if (error > 40) {
           // Ran through the platform without stopping.

@@ -232,7 +232,11 @@ export class TrainPhysics {
     // Do not let the brakes drag the train backwards.
     if (v > 0 && newSpeed < 0 && this.brakeOutput > 0.02) newSpeed = 0;
     if (v < 0 && newSpeed > 0 && this.brakeOutput > 0.02) newSpeed = 0;
-    if (Math.abs(newSpeed) < 0.02 && this.powerNotch === 0) newSpeed = 0;
+    // Nor let it crawl along at a few centimetres a second: below the speed at
+    // which the brakes simply hold it, a braked train with no power on is
+    // stopped, not moving very slowly.
+    const crawl = this.brakeOutput > 0.02 ? 0.06 : 0.02;
+    if (Math.abs(newSpeed) < crawl && this.powerNotch === 0) newSpeed = 0;
 
     this.speed = newSpeed;
     this.position += this.speed * dt;

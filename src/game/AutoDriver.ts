@@ -7,11 +7,21 @@ import { stopPositionFor, type Journey } from './Journey';
  * Automatic driving (ATO).
  *
  * Drives the way a careful driver does rather than the way a controller does:
- * it works to a target speed built from the line limit ahead and the braking
- * curve to the next stopping mark, moves one notch at a time with a pause
- * between movements so the ride stays smooth, and eases the brake off as the
- * train comes to rest so the stop is soft.
+ * it works out the deceleration the train actually needs for whatever is
+ * coming - the stopping mark, a speed restriction, the line limit - and picks
+ * the brake notch that produces it, moving a notch at a time so the ride stays
+ * smooth. Choosing the notch from the required rate rather than from the speed
+ * error is what makes it hold the braking curve instead of riding above it and
+ * running through the platform.
  */
+
+/** Comfortable braking, as a fraction of the full service brake. */
+const COMFORT = 0.45;
+/** Seconds the brake takes to do anything, allowed for when it is applied. */
+const BRAKE_LAG = 0.35;
+/** How far short of the mark the train is aimed, metres. */
+const STOP_MARGIN = 0.1;
+
 export class AutoDriver {
   enabled = false;
 
@@ -28,7 +38,8 @@ export class AutoDriver {
   /**
    * The speed the train should be doing right now: the lowest of the current
    * limit, any lower limit close enough ahead to have to brake for, and the
-   * braking curve down to the next stopping mark.
+   * braking curve down to the next stopping mark. Shown on the cab display;
+   * the handles are worked from the required deceleration instead.
    */
   targetSpeed(train: TrainPhysics): number {
     const position = train.position;
@@ -36,8 +47,7 @@ export class AutoDriver {
     let target = limit - 3;
 
     // Look far enough ahead to brake comfortably for a restriction.
-    const lookahead = Math.max(220, train.stoppingDistance(train.spec.serviceBrake * 0.5) + 160);
-    const restriction = this.track.nextRestriction(position, lookahead);
+    const restriction = this.track.nextRestriction(position, this.lookahead(train));
     if (restriction) {
       const distance = Math.max(0, restriction.s - position - 30);
       const allowed = this.curveSpeed(train, distance, restriction.limit - 3);
@@ -55,12 +65,28 @@ export class AutoDriver {
 
   /** Speed from which the train can still reach `endSpeed` in `distance`. */
   private curveSpeed(train: TrainPhysics, distance: number, endSpeed: number): number {
-    // Brake at roughly half the available rate: comfortable, and it leaves
-    // something in hand if the driver's aid has under-estimated.
-    const rate = train.spec.serviceBrake * 0.45;
+    const rate = train.spec.serviceBrake * COMFORT;
     const usable = Math.max(0, distance - 6);
     const endMs = Math.max(0, endSpeed) / MS_TO_KMH;
     return Math.sqrt(endMs * endMs + 2 * rate * usable) * MS_TO_KMH;
+  }
+
+  /** How far ahead it is worth looking for something to brake for. */
+  private lookahead(train: TrainPhysics): number {
+    return Math.max(240, train.stoppingDistance(train.spec.serviceBrake * COMFORT) + 180);
+  }
+
+  /**
+   * Deceleration in m/s^2 needed to be down to `endSpeed` (m/s) in `distance`
+   * metres. Infinite once the train can no longer make it.
+   */
+  private requiredRate(speed: number, distance: number, endSpeed: number): number {
+    if (speed <= endSpeed) return 0;
+    // The brake does not come on the moment it is asked for, so the train
+    // covers a little ground at the current speed before it starts to slow.
+    const usable = distance - speed * BRAKE_LAG - STOP_MARGIN;
+    if (usable <= 0.05) return Infinity;
+    return (speed * speed - endSpeed * endSpeed) / (2 * usable);
   }
 
   /** Drives the train for one simulation step. */
@@ -77,64 +103,101 @@ export class AutoDriver {
     }
 
     const station = this.journey.nextStation(train.position);
-    if (station && !station.served && Math.abs(train.speed) < 0.1) {
-      const distance = stopPositionFor(station) - train.position;
-      // Stopped short of the mark: creep up to it rather than sitting there.
-      if (distance > 1.2 && distance < 60) {
+    const working = station && !station.served ? station : null;
+    const toMark = working ? stopPositionFor(working) - train.position : Infinity;
+    const speed = Math.abs(train.speed);
+    const stationary = speed < 0.15;
+
+    // Doors closing: stay put until the departure time comes round.
+    if (working && this.journey.phase === 'ready') {
+      train.setPower(0);
+      train.setBrake(MAX_BRAKE_NOTCH);
+      this.target = 0;
+      return;
+    }
+
+    if (working && stationary) {
+      // Standing at the mark - or past it. Hold the train there with a
+      // definite application so the stop registers and nothing rolls.
+      if (toMark <= 1.0) {
+        train.setPower(0);
+        if (train.brakeNotch < 4) train.setBrake(4);
+        this.target = 0;
+        return;
+      }
+      // Stopped short of it: creep up rather than sitting there.
+      if (toMark < 60) {
         train.setBrake(0);
         train.setPower(1);
-        this.target = 8;
+        this.target = 6;
         return;
       }
     }
 
-    // Wait for the departure time once the doors have closed.
-    if (station && station.served === false && this.journey.phase === 'ready') {
+    this.target = this.targetSpeed(train);
+    const spec = train.spec;
+    const limit = this.track.limitAt(train.position);
+
+    // Work out the hardest deceleration anything ahead calls for.
+    let required = 0;
+    if (working) required = Math.max(required, this.requiredRate(speed, Math.max(toMark, 0), 0));
+    const restriction = this.track.nextRestriction(train.position, this.lookahead(train));
+    if (restriction) {
+      required = Math.max(
+        required,
+        this.requiredRate(speed, restriction.s - train.position - 25, (restriction.limit - 2) / MS_TO_KMH),
+      );
+    }
+
+    if (required >= spec.serviceBrake * COMFORT * 0.8) {
       train.setPower(0);
-      train.setBrake(MAX_BRAKE_NOTCH);
+      const wanted = clamp(Math.ceil((required / spec.serviceBrake) * MAX_BRAKE_NOTCH), 1, MAX_BRAKE_NOTCH);
+      this.moveBrake(train, wanted);
       return;
     }
-    const target = this.targetSpeed(train);
-    this.target = target;
-    const speed = train.speedKmh;
-    const error = target - speed;
+
+    // Nothing to brake for. Hold the line speed with a light application if
+    // the road is falling away, otherwise release and drive to the target.
+    if (train.speedKmh > limit + 0.5) {
+      train.setPower(0);
+      this.moveBrake(train, 2);
+      return;
+    }
+
+    if (train.brakeNotch > 0) {
+      if (this.notchCooldown <= 0) {
+        train.setBrake(train.brakeNotch - 1);
+        this.notchCooldown = 0.3;
+      }
+      return;
+    }
 
     if (this.notchCooldown > 0) return;
-
-    if (error < -1.0) {
-      // Too fast: shut off, then brake progressively.
-      if (train.powerNotch > 0) {
-        train.setPower(train.powerNotch - 1);
-      } else {
-        const wanted = clamp(Math.ceil(-error / 3), 1, MAX_BRAKE_NOTCH - 1);
-        // Ease off as the train comes to rest so the stop is soft.
-        const softened = speed < 12 ? Math.min(wanted, 3) : wanted;
-        if (train.brakeNotch < softened) train.setBrake(train.brakeNotch + 1);
-        else if (train.brakeNotch > softened) train.setBrake(train.brakeNotch - 1);
-      }
-      this.notchCooldown = 0.55;
-      return;
-    }
-
-    if (error > 2.5) {
-      // Room to accelerate: release the brake first, then take power.
-      if (train.brakeNotch > 0) {
-        train.setBrake(train.brakeNotch - 1);
-        this.notchCooldown = 0.4;
-      } else if (train.powerNotch < MAX_POWER_NOTCH) {
-        train.setPower(train.powerNotch + 1);
-        this.notchCooldown = 0.85;
-      }
-      return;
-    }
-
-    // Close to the target: coast, trimming a notch off at a time.
-    if (error < 0.6 && train.powerNotch > 0) {
+    const error = this.target - train.speedKmh;
+    if (error > 2.5 && train.powerNotch < MAX_POWER_NOTCH) {
+      train.setPower(train.powerNotch + 1);
+      this.notchCooldown = 0.85;
+    } else if (error < 0.5 && train.powerNotch > 0) {
       train.setPower(train.powerNotch - 1);
       this.notchCooldown = 0.7;
-    } else if (error > 1.4 && train.brakeNotch > 0) {
+    }
+  }
+
+  /**
+   * Works the brake handle towards `wanted`, a notch at a time. Brake is taken
+   * promptly - and straight away when the train is well behind the curve -
+   * but released gently, which is what keeps the ride comfortable.
+   */
+  private moveBrake(train: TrainPhysics, wanted: number): void {
+    if (train.brakeNotch === wanted) return;
+    if (wanted > train.brakeNotch) {
+      if (this.notchCooldown > 0 && wanted < train.brakeNotch + 3) return;
+      train.setBrake(train.brakeNotch + 1);
+      this.notchCooldown = 0.3;
+    } else {
+      if (this.notchCooldown > 0) return;
       train.setBrake(train.brakeNotch - 1);
-      this.notchCooldown = 0.5;
+      this.notchCooldown = 0.45;
     }
   }
 }
