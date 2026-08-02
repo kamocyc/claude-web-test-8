@@ -47,6 +47,22 @@ export class Engine {
   private updateCb: FrameCallback = () => {};
   private renderCb: FrameCallback = () => {};
 
+  /**
+   * Post-processing watchdog.
+   *
+   * Some drivers cannot render the half-float targets the bloom pass needs and
+   * return a completely black frame instead of failing, which loses the whole
+   * picture even though the scene itself is fine. The first few seconds of
+   * output are sampled; if the composer only ever produces black, bloom is
+   * dropped, and if that does not help post-processing is bypassed entirely.
+   * Rendering something plain is always better than rendering nothing.
+   */
+  private postStage: 'full' | 'nobloom' | 'off' = 'full';
+  private watchdogTimer = 0;
+  private blackFrames = 0;
+  private watchdogChecks = 12;
+  private readonly pixelProbe = new Uint8Array(4 * 16);
+
   /** Smoothed frame time in milliseconds, for the debug overlay. */
   frameMs = 16;
   fps = 60;
@@ -117,13 +133,35 @@ export class Engine {
     this.smaaPass = new SMAAPass();
     this.composer.addPass(this.smaaPass);
 
+    // `?post=off` renders the scene straight to the canvas, which is the first
+    // thing to try if a device shows a black or broken picture.
+    if (
+      typeof location !== 'undefined' &&
+      new URLSearchParams(location.search).get('post') === 'off'
+    ) {
+      this.disablePost();
+    }
+
     this.resize();
     window.addEventListener('resize', this.resize);
     canvas.addEventListener('webglcontextlost', this.onContextLost);
+    canvas.addEventListener('webglcontextrestored', this.onContextRestored);
   }
 
   private targetPixelRatio(): number {
-    return clamp(window.devicePixelRatio * this.resolutionScale, 0.6, this.profile.maxPixelRatio);
+    const ratio = clamp(
+      window.devicePixelRatio * this.resolutionScale,
+      0.6,
+      this.profile.maxPixelRatio,
+    );
+    // The composer holds two full-size half-float buffers and the bloom pass
+    // ten more, so a retina 4K panel at ratio 1.5 asks for far more video
+    // memory than the picture is worth - and on a tight GPU that is where a
+    // frame quietly turns black. Cap the drawing buffer by area as well.
+    const budget = 6_200_000;
+    const pixels = window.innerWidth * window.innerHeight * ratio * ratio;
+    if (pixels <= budget) return ratio;
+    return Math.max(0.6, ratio * Math.sqrt(budget / pixels));
   }
 
   applySettings(settings: GameSettings): void {
@@ -131,11 +169,17 @@ export class Engine {
     this.camera.fov = settings.fov;
     this.camera.far = this.profile.viewDistance * 1.6;
     this.camera.updateProjectionMatrix();
-    this.bloomPass.enabled = this.profile.bloom;
+    this.bloomPass.enabled = this.profile.bloom && this.postStage === 'full';
     this.gradePass.uniforms.uGrain.value = this.profile.grain ? 0.035 : 0;
     this.renderer.shadowMap.enabled = true;
     this.resolutionScale = 1;
     this.resize();
+    // A new quality level is a new pipeline: watch this one too.
+    if (this.postStage !== 'off') {
+      this.blackFrames = 0;
+      this.watchdogChecks = 12;
+      this.watchdogTimer = 0.4;
+    }
   }
 
   /** Exposed so the sky/weather system can drive lens glare and wet glass. */
@@ -159,9 +203,18 @@ export class Engine {
   };
 
   private onContextLost = (e: Event): void => {
+    // Preventing the default asks the browser for a restored context rather
+    // than leaving the canvas dead.
     e.preventDefault();
     this.stop();
-    console.error('WebGL context lost');
+    console.error('WebGL context lost - waiting for it to be restored');
+  };
+
+  private onContextRestored = (): void => {
+    console.warn('WebGL context restored - dropping post-processing to be safe');
+    this.disablePost();
+    this.resize();
+    this.start();
   };
 
   onUpdate(cb: FrameCallback): void {
@@ -208,7 +261,7 @@ export class Engine {
     this.gradePass.uniforms.uTime.value = elapsed;
 
     const t0 = performance.now();
-    this.composer.render(rawDt);
+    this.renderFrame(rawDt);
     const cost = performance.now() - t0;
 
     this.frameMs = this.frameMs * 0.9 + (rawDt * 1000) * 0.1;
@@ -222,6 +275,99 @@ export class Engine {
     }
     void cost;
   };
+
+  /**
+   * Draws one frame through whichever pipeline is still known to work, and
+   * watches the result for the all-black output some drivers produce instead
+   * of an error.
+   */
+  private renderFrame(dt: number): void {
+    if (this.postStage === 'off') {
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+
+    try {
+      this.composer.render(dt);
+    } catch (error) {
+      console.error('post-processing failed, rendering directly', error);
+      this.disablePost();
+      return;
+    }
+
+    if (this.watchdogChecks > 0) {
+      this.watchdogTimer -= dt;
+      if (this.watchdogTimer <= 0) {
+        this.watchdogTimer = 0.4;
+        this.watchdogChecks--;
+        this.checkForBlackFrame();
+      }
+    }
+  }
+
+  /**
+   * Reads back a few pixels from the middle of the frame that was just drawn.
+   * The sky is always lit at this point, so an exactly black result means the
+   * pipeline - not the scene - is at fault.
+   */
+  private checkForBlackFrame(): void {
+    const gl = this.renderer.getContext();
+    const w = this.renderer.domElement.width;
+    const h = this.renderer.domElement.height;
+    if (w < 8 || h < 8) return;
+
+    this.renderer.setRenderTarget(null);
+    try {
+      gl.readPixels(
+        Math.floor(w / 2) - 2,
+        Math.floor(h / 2) - 2,
+        4,
+        4,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        this.pixelProbe,
+      );
+    } catch {
+      this.watchdogChecks = 0;
+      return;
+    }
+
+    let sum = 0;
+    for (let i = 0; i < this.pixelProbe.length; i += 4) {
+      sum += this.pixelProbe[i] + this.pixelProbe[i + 1] + this.pixelProbe[i + 2];
+    }
+    if (sum > 0) {
+      // A picture came out: nothing to do, and stop looking.
+      this.blackFrames = 0;
+      this.watchdogChecks = 0;
+      return;
+    }
+
+    if (++this.blackFrames < 3) return;
+    this.blackFrames = 0;
+    if (this.postStage === 'full' && this.bloomPass.enabled) {
+      console.warn('bloom produced a black frame on this device - disabling it');
+      this.postStage = 'nobloom';
+      this.bloomPass.enabled = false;
+      this.watchdogChecks = 12;
+    } else {
+      console.warn('post-processing produced a black frame on this device - bypassing it');
+      this.disablePost();
+    }
+  }
+
+  /** Falls back to drawing the scene straight to the canvas. */
+  private disablePost(): void {
+    this.postStage = 'off';
+    this.watchdogChecks = 0;
+    this.bloomPass.enabled = false;
+  }
+
+  /** True while the picture is going through the full post chain. */
+  get postProcessing(): 'full' | 'nobloom' | 'off' {
+    return this.postStage;
+  }
 
   /**
    * Dynamic resolution: nudges the drawing buffer scale to hold ~50 fps

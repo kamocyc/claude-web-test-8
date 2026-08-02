@@ -601,6 +601,7 @@ export class Game {
         `draws ${this.engine.drawCalls}  tris ${(this.engine.triangles / 1000).toFixed(0)}k`,
         `chunks ${this.world.chunkCount}  tiles ${this.world.tiles.tileCount} (+${this.world.tiles.pendingCount})`,
         `biome ${track.biomeAt(this.train.position)}  seed ${this.seed}`,
+        `quality ${this.settings.quality}  post ${this.engine.postProcessing}`,
         `s ${this.train.position.toFixed(0)} m  a ${this.train.acceleration.toFixed(2)} m/s²`,
       ],
       this.debugVisible,
