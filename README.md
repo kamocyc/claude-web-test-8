@@ -11,12 +11,17 @@ texture is synthesised on a canvas at load time and every mesh is generated
 from code, so the whole game is about 1 MB of JavaScript. The interface is
 available in English and Japanese.
 
+**Play it:** https://kamocyc.github.io/claude-web-test-8/
+
 ```bash
 npm install
 npm run dev        # http://localhost:5173
 npm run build      # type-check + production bundle into dist/
 npm run preview    # serve the production build
 ```
+
+Pushing to `main` builds the bundle and publishes it to GitHub Pages
+(`.github/workflows/deploy-pages.yml`).
 
 ## Driving
 
