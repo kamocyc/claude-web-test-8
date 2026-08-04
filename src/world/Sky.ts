@@ -69,9 +69,11 @@ const skyFragment = /* glsl */ `
   ${SKY_MAPPING_GLSL}
   ${NIGHT_GLSL}
 
-  vec2 octEncode(vec3 d) {
-    vec3 n = d / max(abs(d.x) + abs(d.y) + abs(d.z), 1e-5);
-    return vec2(n.x + n.z, n.x - n.z) * 0.5 + 0.5;
+  /** Inverse of the cloud table's azimuth/elevation mapping. */
+  vec2 cloudUv(vec3 d) {
+    float azimuth = atan(d.z, d.x);
+    float elev = asin(clamp(d.y, 0.0, 1.0));
+    return vec2(azimuth / (2.0 * SKY_PI) + 0.5, sqrt(elev / (SKY_PI * 0.5)));
   }
 
   void main() {
@@ -112,7 +114,7 @@ const skyFragment = /* glsl */ `
 
     // Clouds, composited over everything that is further away than they are.
     if (dir.y > -0.03) {
-      vec4 cl = texture2D(uClouds, octEncode(vec3(dir.x, max(dir.y, 0.0), dir.z)));
+      vec4 cl = texture2D(uClouds, cloudUv(dir));
       float fade = uCloudFade * smoothstep(-0.03, 0.02, dir.y);
       float t = mix(1.0, cl.a, fade);
       sky = sky * t + cl.rgb * fade;
@@ -222,7 +224,7 @@ function cloudLook(w: ResolvedWeather): {
     density: lerp(1, 1.5, overcast) * lerp(1, 1.5, storm),
     absorption: lerp(1, 1.35, overcast) * lerp(1, 1.6, storm),
     detail: lerp(0.34, 0.2, overcast),
-    cirrus: lerp(0.55, 0.0, smoothstep(0.25, 0.7, w.cloudCover)),
+    cirrus: lerp(0.38, 0.0, smoothstep(0.2, 0.62, w.cloudCover)),
   };
 }
 
@@ -257,6 +259,8 @@ export class SkySystem {
   private readonly scratch = new Color();
   private cloudShadow = 0;
   private cameraY = 0;
+  private exposure = 1;
+  private lastWall = 0;
 
   /** Time of day in seconds since midnight. */
   timeOfDay = 16 * 3600 + 42 * 60;
@@ -479,11 +483,9 @@ export class SkySystem {
       w.turbidity,
       0.15,
       Math.max(this.cameraY, 0) * 0.001,
+      this.exposure,
       force,
     );
-    const look = cloudLook(w);
-    Object.assign(this.clouds.settings, look, { coverage: w.cloudCover });
-
     // After sunset the deck is lit by the moon instead, which is a thousand
     // times weaker and comes from somewhere else entirely.
     const night = this.nightFactor;
@@ -492,10 +494,10 @@ export class SkySystem {
     this.keyDirection.copy(this.sunDirection).lerp(this.moonDirection, night).normalize();
     this.keyColor
       .set(this.sunTransmittance.r, this.sunTransmittance.g, this.sunTransmittance.b)
-      .multiplyScalar(9 * (1 - night));
-    this.keyColor.x += 0.030 * night * illum * moonUp;
-    this.keyColor.y += 0.036 * night * illum * moonUp;
-    this.keyColor.z += 0.052 * night * illum * moonUp;
+      .multiplyScalar(4.6 * this.exposure * (1 - night));
+    this.keyColor.x += 0.016 * night * illum * moonUp;
+    this.keyColor.y += 0.019 * night * illum * moonUp;
+    this.keyColor.z += 0.027 * night * illum * moonUp;
 
     this.clouds.setEnvironment(
       this.luts.skyView,
@@ -522,8 +524,13 @@ export class SkySystem {
     this.cameraY = cameraPos.y;
 
     // Weather crossfades rather than snapping; a front takes a few seconds to
-    // come through instead of appearing between one frame and the next.
-    const k = 1 - Math.exp(-dt * 0.28);
+    // come through instead of appearing between one frame and the next. The
+    // blend runs on wall time, not on the simulation step, so a slow machine
+    // gets the same transition rather than a much longer one.
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const wallDt = this.lastWall > 0 ? Math.min(0.5, (now - this.lastWall) / 1000) : dt;
+    this.lastWall = now;
+    const k = 1 - Math.exp(-wallDt * 1.1);
     const w = this.weather;
     const t = this.target;
     w.cloudCover = lerp(w.cloudCover, t.cloudCover, k);
@@ -535,6 +542,7 @@ export class SkySystem {
     w.turbidity = lerp(w.turbidity, t.turbidity, k);
 
     this.computeSun();
+    Object.assign(this.clouds.settings, cloudLook(w), { coverage: w.cloudCover });
     this.clouds.setWeather(
       dt,
       Math.cos(w.windDirection),
@@ -564,6 +572,12 @@ export class SkySystem {
     const dusk = Math.exp(-Math.pow((e - 0.02) / 0.12, 2));
     const night = this.nightFactor;
 
+    // The eye opens as the sun goes down. Without this a physically scaled sky
+    // renders golden hour as blue hour and blue hour as night: one factor,
+    // applied to the table and to every light that comes off it, so the whole
+    // image adapts together instead of drifting apart.
+    this.exposure = lerp(1.95, 1.0, smoothstep(-0.02, 0.42, e));
+
     transmittance(this.sunTransmittance, Math.max(this.cameraY, 0) * 0.001, e, w.turbidity);
     const lum =
       this.sunTransmittance.r * 0.2126 +
@@ -588,7 +602,7 @@ export class SkySystem {
     const sunThrough = lerp(1, 0.12, cloudBlock) * lerp(1, 0.5, w.fog);
     const above = smoothstep(-0.03, 0.10, e);
 
-    this.sun.intensity = 6.2 * Math.pow(lum, 0.55) * above * sunThrough;
+    this.sun.intensity = 6.2 * Math.pow(lum, 0.55) * above * sunThrough * this.exposure;
     this.sun.color.setRGB(
       this.sunTransmittance.r / Math.max(lum, 1e-4),
       this.sunTransmittance.g / Math.max(lum, 1e-4),
@@ -598,13 +612,16 @@ export class SkySystem {
     // Moon light, with the phase actually controlling how much there is.
     const illum = 0.5 - 0.5 * Math.cos(this.moonPhase * Math.PI * 2);
     this.moon.intensity =
-      night * 0.30 * illum * smoothstep(-0.04, 0.12, this.moonDirection.y) * lerp(1, 0.25, cloudBlock);
-    this.moon.color.setRGB(0.55, 0.63, 0.9);
+      night * 0.62 * illum * smoothstep(-0.04, 0.12, this.moonDirection.y) *
+      lerp(1, 0.25, cloudBlock) * this.exposure;
+    this.moon.color.setRGB(0.58, 0.66, 0.92);
 
     // Sky bounce. The environment map carries most of the indirect light, so
     // this is a gentle fill that keeps shadows readable.
     const overcast = w.cloudCover;
-    this.hemi.intensity = lerp(0.05, 0.26, day) * lerp(1, 2.1, overcast) + night * 0.03;
+    const moonlit = night * illum * smoothstep(-0.04, 0.14, this.moonDirection.y);
+    this.hemi.intensity =
+      lerp(0.05, 0.26, day) * lerp(1, 2.1, overcast) + night * 0.02 + moonlit * 0.075;
     this.hemi.color.setRGB(
       lerp(0.05, 0.48, day) + dusk * 0.30,
       lerp(0.07, 0.66, day) + dusk * 0.12,
@@ -615,7 +632,7 @@ export class SkySystem {
       lerp(0.03, 0.24, day),
       lerp(0.04, 0.19, day),
     );
-    this.ambient.intensity = lerp(0.03, 0.06, day) + overcast * 0.04;
+    this.ambient.intensity = lerp(0.02, 0.06, day) + overcast * 0.04 + moonlit * 0.02;
 
     // Colours other systems read: the horizon for fog and water, the zenith
     // for glass. Both follow the transmittance rather than a fixed palette.
@@ -639,17 +656,21 @@ export class SkySystem {
     );
 
     // Environment intensity: image based lighting tracks the daylight.
-    this.scene.environmentIntensity = lerp(0.16, 0.85, day) * lerp(1, 1.25, overcast) + dusk * 0.05;
+    this.scene.environmentIntensity =
+      (lerp(0.30, 1.55, day) * lerp(1, 1.25, overcast) + dusk * 0.08 + moonlit * 0.9) *
+      this.exposure;
 
     // Dome uniforms.
     const u = this.material.uniforms;
     u.uTime.value = elapsed;
-    u.uStars.value = 1;
+    // Stars only once the sun is properly down; a physically dim golden-hour
+    // sky would otherwise let them through.
+    u.uStars.value = smoothstep(0.03, -0.05, e) * this.exposure;
     (u.uSunDisc.value as Vector3).set(
       this.sunTransmittance.r,
       this.sunTransmittance.g,
       this.sunTransmittance.b,
-    ).multiplyScalar(90);
+    ).multiplyScalar(46 * this.exposure);
     (u.uMoonTint.value as Vector3).set(1, 1, 1).multiplyScalar(lerp(0.35, 1, illum));
     u.uGroundFade.value = lerp(0.55, 0.8, overcast);
     u.uCloudFade.value = 1;
@@ -661,8 +682,8 @@ export class SkySystem {
     // One number sets how far you can see: clean air, summer murk, a rain
     // squall and a valley fog bank are the same model at different densities.
     const density =
-      (0.0003 + w.turbidity * 0.0001) * haze +
-      w.rain * 0.00042 +
+      (0.00017 + w.turbidity * 0.00006) * haze +
+      w.rain * 0.00075 +
       w.fog * 0.0021 +
       w.snow * 0.0004;
     this.fog.density = density;
@@ -691,6 +712,11 @@ export class SkySystem {
   /** Colour of the ambient sky light, used to tint water and windows. */
   get horizon(): Color {
     return this.horizonColor;
+  }
+
+  /** The shared aerial perspective uniforms, exposed for debugging. */
+  get aerial(): typeof aerialUniforms {
+    return aerialUniforms;
   }
 
   /** How much of the sun a cloud is currently taking away, 0..1. */

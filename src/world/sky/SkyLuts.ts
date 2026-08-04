@@ -154,7 +154,7 @@ const SKYVIEW_FRAGMENT = /* glsl */ `
     // atmosphere is rotationally symmetric so that costs nothing and lets the
     // table cover a half turn of azimuth instead of a whole one.
     vec2 p = clamp((vUv - 0.5 * uTexel) / (1.0 - uTexel), 0.0, 1.0);
-    float azimuth = p.x * PI;
+    float azimuth = p.x * p.x * PI;
     float s = p.y * 2.0 - 1.0;
     float l = sign(s) * s * s;
     float horiz = sqrt(max(0.0, 1.0 - l * l));
@@ -237,9 +237,16 @@ function makeTarget(width: number, height: number): WebGLRenderTarget {
   return target;
 }
 
+/**
+ * Scales the whole sky into the range the tone mapper and the bloom threshold
+ * want: a midday zenith lands near 0.35 in linear light, and only genuine
+ * highlights are left above the 0.92 the bloom pass cuts at.
+ */
+const BASE_IRRADIANCE = 4.6;
+
 const TRANSMITTANCE_SIZE = new Vector2(160, 48);
 const MULTISCATTER_SIZE = new Vector2(32, 32);
-const SKYVIEW_SIZE = new Vector2(128, 96);
+const SKYVIEW_SIZE = new Vector2(192, 128);
 
 export class SkyLuts {
   readonly transmittance = makeTarget(TRANSMITTANCE_SIZE.x, TRANSMITTANCE_SIZE.y);
@@ -259,6 +266,7 @@ export class SkyLuts {
   private bakedAlbedo = -1;
   private bakedSun = new Vector3(0, -2, 0);
   private bakedHeight = -1;
+  private bakedExposure = -1;
 
   constructor() {
     this.shared = {
@@ -298,7 +306,10 @@ export class SkyLuts {
       uCameraHeight: { value: 0.02 },
       // Scales the whole sky into the range the tone mapper wants; every
       // consumer reads the same table so nothing can drift out of step.
-      uSunIrradiance: { value: 9.0 },
+      // Chosen so a midday zenith lands near 0.35 in linear light: the bloom
+      // pass thresholds at 0.92, and a sky brighter than that blooms as a
+      // whole and turns the picture to milk.
+      uSunIrradiance: { value: BASE_IRRADIANCE },
       uTransmittanceLut: { value: this.transmittance.texture },
       uTransmittanceTexel: { value: this.transmittanceTexel },
       uMultiScatterLut: { value: this.multiScatter.texture },
@@ -326,6 +337,7 @@ export class SkyLuts {
     turbidity: number,
     groundAlbedo: number,
     cameraHeightKm: number,
+    exposure: number,
     force = false,
   ): boolean {
     const staticStale =
@@ -358,9 +370,12 @@ export class SkyLuts {
     const sunStale =
       staticStale ||
       this.bakedSun.dot(sunDir) < 0.99997 ||
-      Math.abs(cameraHeightKm - this.bakedHeight) > 0.05;
+      Math.abs(cameraHeightKm - this.bakedHeight) > 0.05 ||
+      Math.abs(exposure - this.bakedExposure) > 0.01;
 
     if (sunStale) {
+      this.bakedExposure = exposure;
+      this.skyViewUniforms.uSunIrradiance.value = BASE_IRRADIANCE * exposure;
       this.bakedSun.copy(sunDir);
       this.bakedHeight = cameraHeightKm;
       (this.skyViewUniforms.uSunDir.value as Vector3).copy(sunDir);

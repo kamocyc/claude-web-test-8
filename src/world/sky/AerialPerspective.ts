@@ -116,7 +116,11 @@ const FOG_FRAGMENT = /* glsl */ `
     skyCol = mix(skyCol, skyCol * uAerialGround, smoothstep(0.02, -0.14, fogDir.y));
     skyCol *= uAerialTint;
 
-    gl_FragColor.rgb = gl_FragColor.rgb * transmittance + skyCol * (vec3(1.0) - transmittance);
+    // Clamped on the way out: one stray non-finite pixel would be smeared
+    // across the whole frame by the bloom pass.
+    gl_FragColor.rgb = clamp(
+      gl_FragColor.rgb * transmittance + skyCol * (vec3(1.0) - transmittance),
+      0.0, 200.0);
   }
 #endif
 `;

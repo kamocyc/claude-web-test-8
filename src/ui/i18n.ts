@@ -75,6 +75,8 @@ const en: Dict = {
   'weather.fair': 'FAIR',
   'weather.overcast': 'OVERCAST',
   'weather.rain': 'RAIN',
+  'weather.mist': 'MIST',
+  'weather.snow': 'SNOW',
 
   'camera.cab': 'Cab',
   'camera.window': 'Passenger window',
@@ -178,6 +180,8 @@ const ja: Dict = {
   'weather.fair': '晴れ',
   'weather.overcast': '曇り',
   'weather.rain': '雨',
+  'weather.mist': '霧',
+  'weather.snow': '雪',
 
   'camera.cab': '運転台',
   'camera.window': '車窓',

@@ -39,7 +39,9 @@ vec2 skyViewUv(vec3 dir, vec3 sunDir, vec2 texel) {
   float dl = length(dh);
   float sl = length(sh);
   float cosAzimuth = (dl > 1e-5 && sl > 1e-5) ? dot(dh, sh) / (dl * sl) : 1.0;
-  float azimuth = acos(clamp(cosAzimuth, -1.0, 1.0)) / SKY_PI;
+  // Square-root warped so the table spends its columns near the sun, where
+  // the inscattered glow has all of its gradient.
+  float azimuth = sqrt(acos(clamp(cosAzimuth, -1.0, 1.0)) / SKY_PI);
   float l = clamp(dir.y, -1.0, 1.0);
   float v = 0.5 + 0.5 * sign(l) * sqrt(abs(l));
   vec2 p = vec2(azimuth, v);

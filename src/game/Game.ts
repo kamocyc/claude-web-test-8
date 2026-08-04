@@ -43,10 +43,12 @@ import { generateRouteName, generateService, type RouteName, type ServiceInfo } 
  */
 
 const WEATHER_PRESETS = [
-  { key: 'weather.clear', cloudCover: 0.18, rain: 0, wind: 2.4 },
-  { key: 'weather.fair', cloudCover: 0.42, rain: 0, wind: 3.6 },
-  { key: 'weather.overcast', cloudCover: 0.85, rain: 0, wind: 5.2 },
-  { key: 'weather.rain', cloudCover: 0.95, rain: 0.75, wind: 7.5 },
+  { key: 'weather.clear', cloudCover: 0.18, rain: 0, wind: 2.4, fog: 0, snow: 0 },
+  { key: 'weather.fair', cloudCover: 0.42, rain: 0, wind: 3.6, fog: 0, snow: 0 },
+  { key: 'weather.overcast', cloudCover: 0.85, rain: 0, wind: 5.2, fog: 0, snow: 0 },
+  { key: 'weather.rain', cloudCover: 0.95, rain: 0.75, wind: 7.5, fog: 0.08, snow: 0 },
+  { key: 'weather.mist', cloudCover: 0.7, rain: 0, wind: 1.2, fog: 0.75, snow: 0 },
+  { key: 'weather.snow', cloudCover: 0.9, rain: 0.55, wind: 3.0, fog: 0.2, snow: 1 },
 ];
 
 const MONTHS = [
@@ -90,6 +92,7 @@ export class Game {
   private readonly baseDate = new Date();
   private readonly cameraPos = new Vector3();
   private readonly trainVelocity = new Vector3();
+  private readonly rainWind = new Vector3();
   private readonly zenith = new Color(0.075, 0.215, 0.585);
   /** Start hour forced by the URL, or null for a random departure time. */
   private readonly forcedStartHour: number | null;
@@ -484,6 +487,8 @@ export class Game {
       rain: preset.rain,
       wind: preset.wind,
       windDirection: 0.7,
+      fog: preset.fog,
+      snow: preset.snow,
     });
   }
 
@@ -537,11 +542,25 @@ export class Game {
       .set(Math.cos(sample.heading), 0, Math.sin(sample.heading))
       .multiplyScalar(this.train.speed);
     this.rain.intensity = this.sky.weather.rain * (1 - this.tunnelFactor);
-    this.rain.update(dt, this.cameraPos, this.trainVelocity, lerp(0.4, 1, 1 - darkness));
+    this.rain.snow = this.sky.weather.snow ?? 0;
+    this.rainWind.set(
+      Math.cos(this.sky.weather.windDirection) * this.sky.weather.wind * 0.5,
+      0,
+      Math.sin(this.sky.weather.windDirection) * this.sky.weather.wind * 0.5,
+    );
+    this.rain.update(
+      dt,
+      this.cameraPos,
+      this.trainVelocity,
+      lerp(0.4, 1, 1 - darkness),
+      sample.y,
+      this.rainWind,
+      elapsed,
+    );
 
     this.engine.setGrade(
       this.sky.glare * (1 - this.tunnelFactor),
-      this.sky.weather.rain * 0.8,
+      Math.min(1, this.sky.weather.rain * 0.8 + (this.sky.weather.fog ?? 0) * 0.4),
     );
 
     this.updateHud(dt);

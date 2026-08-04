@@ -1,6 +1,7 @@
 import {
   ClampToEdgeWrapping,
   GLSL3,
+  RepeatWrapping,
   HalfFloatType,
   LinearFilter,
   NoColorSpace,
@@ -8,6 +9,7 @@ import {
   ShaderMaterial,
   Vector2,
   Vector3,
+  Vector4,
   WebGLRenderTarget,
   type IUniform,
   type WebGLRenderer,
@@ -126,7 +128,10 @@ const CLOUD_FRAGMENT = /* glsl */ `
     float base = remap(shape.r, worleyFbm - 1.0, 1.0, 0.0, 1.0);
     base *= heightGradient(hf);
 
-    float d = remap(base, 1.0 - cover, 1.0, 0.0, 1.0);
+    // Coverage narrows with height, which is what gives a cumulus its heaped
+    // shape: broad flat base, rounded top, rather than a slab with a texture.
+    float shaped = max(cover * mix(1.0, 0.52, hf * hf * uType), 0.004);
+    float d = remap(base, 1.0 - shaped, 1.0, 0.0, 1.0);
     if (d <= 0.0) return 0.0;
 
     if (!cheap) {
@@ -140,18 +145,25 @@ const CLOUD_FRAGMENT = /* glsl */ `
     return max(d, 0.0) * uDensity;
   }
 
-  vec3 octDecode(vec2 uv) {
-    vec2 p = uv * 2.0 - 1.0;
-    vec2 q = vec2(p.x + p.y, p.x - p.y) * 0.5;
-    float y = 1.0 - abs(q.x) - abs(q.y);
-    return normalize(vec3(q.x, y, q.y));
+  /**
+   * Direction for a table texel. Azimuth runs the whole way round (the texture
+   * wraps, so there is no seam) and elevation is square-root warped, which
+   * spends the rows on the horizon where a cloud field compresses to nothing.
+   * An octahedral map was tried first and creased visibly along its folds.
+   */
+  vec3 tableDir(vec2 uv) {
+    float azimuth = (uv.x - 0.5) * 2.0 * SKY_PI;
+    float elev = uv.y * uv.y * (SKY_PI * 0.5);
+    float y = sin(elev);
+    float r = cos(elev);
+    return vec3(cos(azimuth) * r, y, sin(azimuth) * r);
   }
 
   float lightMarch(vec3 p, float baseHeight, float span) {
     float depth = 0.0;
     float t = 0.0;
-    float step = span * 0.045;
-    for (int i = 0; i < 5; i++) {
+    float step = span * 0.055;
+    for (int i = 0; i < 4; i++) {
       t += step;
       vec3 q = p + uKeyDir * t;
       float hf = clamp((q.y - baseHeight) / span, 0.0, 1.0);
@@ -162,7 +174,7 @@ const CLOUD_FRAGMENT = /* glsl */ `
   }
 
   void main() {
-    vec3 dir = octDecode(vUv);
+    vec3 dir = tableDir(vUv);
     vec3 skyCol = skyRadiance(uSkyView, uSkyViewTexel, dir, uSunDir, uSunTint);
     vec3 ambientTop = skyRadiance(uSkyView, uSkyViewTexel, vec3(0.0, 1.0, 0.0), uSunDir, uSunTint);
 
@@ -196,7 +208,11 @@ const CLOUD_FRAGMENT = /* glsl */ `
 
         if (density > 0.001) {
           float sigma = density * 0.06 * uAbsorption;
-          float shadowDepth = lightMarch(vec3(p.x, height, p.z), uBottom, span);
+          // Once the ray is mostly blocked the self-shadowing march stops
+          // paying for itself, and an overcast sky is nearly all blocked ray.
+          float shadowDepth = transmittance > 0.12
+            ? lightMarch(vec3(p.x, height, p.z), uBottom, span)
+            : density * span * 0.35;
 
           // Three octaves of Beer's law with the phase flattening as the order
           // rises: the first bounce gives the silver lining towards the sun,
@@ -206,11 +222,11 @@ const CLOUD_FRAGMENT = /* glsl */ `
           float att = 1.0;
           float contrib = 1.0;
           float ecc = 1.0;
-          for (int o = 0; o < 3; o++) {
+          for (int o = 0; o < 4; o++) {
             float ph = mix(skyHgPhase(cosTheta, 0.78 * ecc), skyHgPhase(cosTheta, -0.32 * ecc), 0.22);
             energy += contrib * exp(-shadowDepth * 0.06 * att * uAbsorption) * ph * 12.566;
-            att *= 0.42;
-            contrib *= 0.62;
+            att *= 0.36;
+            contrib *= 0.6;
             ecc *= 0.5;
           }
 
@@ -221,7 +237,9 @@ const CLOUD_FRAGMENT = /* glsl */ `
 
           float shade = exp(-shadowDepth * 0.05 * uAbsorption);
           vec3 sun = uKeyColor * energy * powderMix * 0.62;
-          vec3 ambient = mix(uGroundBounce, ambientTop * 1.35, hf * 0.7 + 0.3) * (0.30 + 0.9 * shade);
+          // The underside of an overcast deck is grey, not black: it is lit
+          // through by everything above it, and it is what lights the ground.
+          vec3 ambient = mix(uGroundBounce, ambientTop * 1.35, hf * 0.7 + 0.3) * (0.62 + 0.7 * shade);
           vec3 source = (sun + ambient) * sigma;
 
           float stepT = exp(-sigma * dt);
@@ -248,7 +266,7 @@ const CLOUD_FRAGMENT = /* glsl */ `
         float cosTheta = dot(dir, uKeyDir);
         float glow = 1.0 + skyHgPhase(cosTheta, 0.62) * 14.0;
         vec3 col = uKeyColor * 0.075 * glow + ambientTop * 0.45;
-        float a = veil * 0.34;
+        float a = veil * 0.26;
         scattered += transmittance * col * a;
         transmittance *= 1.0 - a;
         depthSum += tc * depthWeight * 0.0;
@@ -279,18 +297,20 @@ export interface CloudSettings {
   cirrus: number;
 }
 
+const scratchScissor = new Vector4();
+
 const LUT_SIZES: Record<string, number> = {
-  low: 256,
-  medium: 384,
-  high: 512,
-  ultra: 640,
+  low: 320,
+  medium: 512,
+  high: 768,
+  ultra: 1024,
 };
 
 const STEP_COUNTS: Record<string, number> = {
-  low: 24,
-  medium: 34,
-  high: 48,
-  ultra: 64,
+  low: 22,
+  medium: 30,
+  high: 44,
+  ultra: 60,
 };
 
 const BAND_COUNTS: Record<string, number> = {
@@ -308,6 +328,7 @@ export class CloudLayer {
   private readonly bands: number;
   private band = 0;
   private primed = false;
+  private lastSignature = -1e9;
   private readonly size: number;
 
   private readonly weatherOffset = new Vector2();
@@ -330,12 +351,12 @@ export class CloudLayer {
     this.bands = BAND_COUNTS[quality] ?? 8;
     const steps = STEP_COUNTS[quality] ?? 48;
 
-    this.target = new WebGLRenderTarget(this.size, this.size, {
+    this.target = new WebGLRenderTarget(this.size, this.size >> 1, {
       type: HalfFloatType,
       format: RGBAFormat,
       minFilter: LinearFilter,
       magFilter: LinearFilter,
-      wrapS: ClampToEdgeWrapping,
+      wrapS: RepeatWrapping,
       wrapT: ClampToEdgeWrapping,
       depthBuffer: false,
       stencilBuffer: false,
@@ -455,10 +476,35 @@ export class CloudLayer {
     this.uniforms.uCirrus.value = s.cirrus;
   }
 
+  /**
+   * A single number standing for the whole cloudscape. Refreshing the table a
+   * band at a time is invisible while only the wind is moving it, but a change
+   * of weather would show up as a stack of horizontal steps across the sky, so
+   * a material change forces the whole table at once instead.
+   */
+  private signature(): number {
+    const s = this.settings;
+    return (
+      s.coverage * 12 +
+      s.type * 4 +
+      s.bottom * 0.002 +
+      s.top * 0.002 +
+      s.density * 2 +
+      s.absorption * 2 +
+      s.cirrus * 3 +
+      (this.uniforms.uKeyDir.value as Vector3).y * 3
+    );
+  }
+
   /** Renders one band of the table, or the whole thing the first time round. */
   render(renderer: WebGLRenderer, force = false): void {
+    const sig = this.signature();
+    if (Math.abs(sig - this.lastSignature) > 0.02) force = true;
+    this.lastSignature = sig;
+
     const previous = renderer.getRenderTarget();
     const previousScissorTest = renderer.getScissorTest();
+    const previousScissor = renderer.getScissor(scratchScissor).clone();
     const previousAutoClear = renderer.autoClear;
     renderer.autoClear = false;
     renderer.setRenderTarget(this.target);
@@ -469,16 +515,18 @@ export class CloudLayer {
       this.primed = true;
       this.band = 0;
     } else {
-      const h = Math.ceil(this.size / this.bands);
+      const rows = this.size >> 1;
+      const h = Math.ceil(rows / this.bands);
       const y = this.band * h;
       renderer.setScissorTest(true);
-      renderer.setScissor(0, y, this.size, Math.min(h, this.size - y));
+      renderer.setScissor(0, y, this.size, Math.min(h, rows - y));
       this.quad.render(renderer);
       renderer.setScissorTest(false);
       this.band = (this.band + 1) % this.bands;
     }
 
     renderer.setRenderTarget(previous);
+    renderer.setScissor(previousScissor);
     renderer.setScissorTest(previousScissorTest);
     renderer.autoClear = previousAutoClear;
   }
