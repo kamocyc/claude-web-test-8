@@ -141,7 +141,7 @@ export class Game {
         ? this.forcedStartHour * 3600
         : 6 * 3600 + rng.range(0, 14 * 3600);
 
-    this.sky = new SkySystem(this.engine.scene, profile.viewDistance);
+    this.sky = new SkySystem(this.engine.scene, profile.viewDistance, this.settings.quality);
     this.sky.timeOfDay = startTime;
     this.sky.timeScale = 1;
     this.sky.configureShadows(profile.shadowMapSize, profile.shadowDistance);
@@ -504,7 +504,7 @@ export class Game {
     this.engine.camera.getWorldPosition(this.cameraPos);
 
     const haze = this.world.hazeAt(this.train.position) * lerp(1, 1.5, this.tunnelFactor);
-    this.sky.update(dt, this.cameraPos, haze, elapsed);
+    this.sky.update(this.engine.renderer, dt, this.cameraPos, haze, elapsed);
     this.sky.tickEnvironment(this.engine.renderer, dt);
 
     const darkness = Math.max(this.sky.nightFactor, this.tunnelFactor * 0.85);
