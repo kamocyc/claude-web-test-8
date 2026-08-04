@@ -145,6 +145,9 @@ export class Game {
     this.sky.timeOfDay = startTime;
     this.sky.timeScale = 1;
     this.sky.configureShadows(profile.shadowMapSize, profile.shadowDistance);
+    // The engine aims the sun's shadow box at whatever the camera is looking
+    // at, which it can only do if it knows which light the sun is.
+    this.engine.setSunLight(this.sky.sun);
     this.applyWeather();
 
     this.world = new World(this.seed, startTime, profile);
@@ -539,10 +542,22 @@ export class Game {
     this.rain.intensity = this.sky.weather.rain * (1 - this.tunnelFactor);
     this.rain.update(dt, this.cameraPos, this.trainVelocity, lerp(0.4, 1, 1 - darkness));
 
-    this.engine.setGrade(
-      this.sky.glare * (1 - this.tunnelFactor),
-      this.sky.weather.rain * 0.8,
-    );
+    const glare = this.sky.glare * (1 - this.tunnelFactor);
+    this.engine.setGrade(glare, this.sky.weather.rain * 0.8);
+    // The post chain needs to know where the sun is and what colour the air
+    // is, for the aerial perspective, the shafts and the time-of-day grade.
+    this.engine.setEnvironment({
+      sunDirection: this.sky.sunDirection,
+      sunColor: this.sky.sun.color,
+      horizonColor: this.sky.horizon,
+      zenithColor: this.zenith,
+      glare,
+      wet: this.sky.weather.rain * 0.8,
+      overcast: this.sky.weather.cloudCover,
+      night: this.sky.nightFactor,
+      tunnel: this.tunnelFactor,
+      haze: clamp(haze, 0.6, 1.8),
+    });
 
     this.updateHud(dt);
   }
