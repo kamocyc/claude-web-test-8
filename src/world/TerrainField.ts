@@ -1,5 +1,5 @@
-import { BIOME_IDS, SEA_LEVEL, TerrainNoise, blendedElevation, blendedAttr } from './Biome';
-import { clamp, lerp, smoothstep } from '../core/MathUtils';
+import { BIOME_IDS, BIOME_INDEX, SEA_LEVEL, TerrainNoise, blendedElevation, blendedAttr } from './Biome';
+import { clamp, clamp01, lerp, smoothstep } from '../core/MathUtils';
 import { SAMPLE_STEP, STRUCT_BRIDGE, STRUCT_TUNNEL, TrackPath, type TrackSample } from './TrackPath';
 
 /** Top of the formation (bottom of the ballast) relative to the rail head. */
@@ -87,15 +87,15 @@ export class TerrainField {
    * Pass the previous result's `hint` when querying a coherent run of points -
    * it turns the search into a short local scan.
    */
-  project(x: number, z: number, hint = -1, out?: ProjectionResult): ProjectionResult {
+  project(x: number, z: number, hint = -1, out?: ProjectionResult, window = 48): ProjectionResult {
     const track = this.track;
     const count = track.sampleCount;
     let best = -1;
     let bestDist = Infinity;
 
     if (hint >= 0) {
-      const lo = Math.max(0, hint - 48);
-      const hi = Math.min(count - 1, hint + 48);
+      const lo = Math.max(0, hint - window);
+      const hi = Math.min(count - 1, hint + window);
       for (let i = lo; i <= hi; i++) {
         const sm = track.at(i);
         const d = (sm.x - x) * (sm.x - x) + (sm.z - z) * (sm.z - z);
@@ -106,7 +106,7 @@ export class TerrainField {
       }
       // If the hint region did not contain a clear minimum, fall through to the
       // coarse search below.
-      if (best > lo && best < hi) return this.refine(x, z, best, out);
+      if (best > lo && best < hi) return this.refine(x, z, best, out, window);
     }
 
     for (const i of this.coarse) {
@@ -120,11 +120,18 @@ export class TerrainField {
     return this.refine(x, z, Math.max(0, best), out);
   }
 
-  private refine(x: number, z: number, start: number, out?: ProjectionResult): ProjectionResult {
+  private refine(
+    x: number,
+    z: number,
+    start: number,
+    out?: ProjectionResult,
+    window = this.coarseStride,
+  ): ProjectionResult {
     const track = this.track;
     const count = track.sampleCount;
-    const lo = Math.max(0, start - this.coarseStride);
-    const hi = Math.min(count - 1, start + this.coarseStride);
+    const span = Math.max(6, Math.min(this.coarseStride, window));
+    const lo = Math.max(0, start - span);
+    const hi = Math.min(count - 1, start + span);
     let best = start;
     let bestDist = Infinity;
     for (let i = lo; i <= hi; i++) {
@@ -173,9 +180,54 @@ export class TerrainField {
       this.noise,
     );
 
+    h = this.liftAboveSea(h, sample);
     h = this.carveRivers(h, sample, lateral, x, z);
     h = this.raiseTunnelRidge(h, sample, lateral, x, z);
     return h;
+  }
+
+  /**
+   * Inland ground is not below the sea.
+   *
+   * Relief is expressed relative to the rail head, so a low-lying stretch of
+   * farmland could dip its fields a metre or two under sea level - and then
+   * the open sea, which is only ever a plane at zero, would be drawn flooding
+   * a valley thirty kilometres from the coast. Away from a coastal stretch the
+   * ground is raised onto a floor just above the waterline; the join is a
+   * smooth maximum, so the plain rises into it rather than meeting it as a
+   * flat pan with a visible edge.
+   */
+  private liftAboveSea(h: number, sample: TrackSample): number {
+    const coastal = sample.weights[BIOME_INDEX.coast];
+    const floor = SEA_LEVEL + 1.8 * (1 - smoothstep(0.04, 0.45, coastal));
+    if (floor <= SEA_LEVEL) return h;
+    const d = h - floor;
+    return floor + 0.5 * (d + Math.sqrt(d * d + 1.2));
+  }
+
+  /**
+   * How much a point behaves like a waterside: silt, sand and weed rather than
+   * turf. Height alone is not enough - a field at half a metre is still a
+   * field - so this asks whether there is actually water to be beside.
+   */
+  shoreFactor(sample: TrackSample, lateral: number, y: number): number {
+    const above = y - SEA_LEVEL;
+    // The foreshore proper, on the seaward side of a coastal stretch.
+    const seaward = sample.seaSide !== 0 ? lateral * sample.seaSide : -1e3;
+    const coastal =
+      smoothstep(0.06, 0.4, sample.weights[BIOME_INDEX.coast]) * smoothstep(-40, 40, seaward);
+    const band = (1 - smoothstep(0.5, 4.2, above)) * smoothstep(-3.0, 0.5, above);
+    const sea = coastal * (band * 1.2 + (above < 0 ? 0.85 : 0));
+
+    // The bank of a lineside canal or drain silts up in the same way.
+    const canal = clamp01(sample.riverStrength);
+    let bank = 0;
+    if (canal > 0.02) {
+      const centre = sample.riverSide * (46 + this.noise.hills.sample(sample.s * 0.0015, 3.1) * 26);
+      const width = 9 + this.noise.detail.sample(sample.s * 0.004, 7.7) * 5;
+      bank = canal * (1 - smoothstep(width * 0.6, width * 2.0, Math.abs(lateral - centre)));
+    }
+    return clamp01(Math.max(sea, bank * 0.8));
   }
 
   /**
@@ -232,18 +284,42 @@ export class TerrainField {
     const s = sample.s;
 
     // Rivers the line crosses on a bridge.
+    //
+    // A Japanese river of any size is not a canal: it is a wide gravel bed
+    // between raised levees, dry over most of its width, with the low flow
+    // threading through it in one or two braided channels. Cutting it as a
+    // flat trough is what turns a river crossing into a lake, so the bed is
+    // built from bars and channels instead.
     for (const river of this.track.rivers) {
       const ds = s - river.s;
       if (Math.abs(ds) > river.width * 2.2 + 220) continue;
       // The river runs across the alignment at an angle.
       const dist = Math.abs(ds - lateral * Math.tan(river.skew)) * Math.cos(river.skew);
       const half = river.width * 0.5;
-      if (dist > half + 90) continue;
-      const bedY = sample.y - river.bankHeight - 4.5;
-      const bank = smoothstep(half, half + 55, dist);
-      const wobble = this.noise.detail.fbm(x * 0.01, z * 0.01, 2) * 3.5;
-      const target = bedY + wobble * (1 - bank);
-      h = lerp(target, h, bank);
+      if (dist > half + 120) continue;
+
+      // The water surface the bridge and the water mesh are both built to.
+      const waterY = sample.y - river.bankHeight - 3.0;
+      // Gravel bars: shingle standing just clear of the water, with the coarse
+      // undulation that shingle always has.
+      const bars = this.noise.detail.fbm(x * 0.011, z * 0.011, 2) * 1.6;
+      const barY = waterY + 1.1 + bars;
+
+      // Two low channels that wander across the bed rather than running
+      // straight, so the water threads instead of pooling.
+      const wander = this.noise.hills.fbm(x * 0.0032, z * 0.0032, 2) * half * 0.5;
+      const main = 1 - smoothstep(river.width * 0.055, river.width * 0.2, Math.abs(dist - (half * 0.28 + wander)));
+      const side = 1 - smoothstep(river.width * 0.04, river.width * 0.15, Math.abs(dist - (half * 0.74 - wander * 0.7)));
+      const channel = Math.max(main, side * 0.75);
+      const bed = barY - channel * (2.4 + river.bankHeight * 0.14);
+
+      const bank = smoothstep(half * 0.92, half + 60, dist);
+      h = lerp(bed, h, bank);
+
+      // The levee: an embankment carrying a maintenance road along each side,
+      // held off the alignment so it never fouls the formation.
+      const crest = Math.exp(-Math.pow((dist - (half + 34)) / 26, 2));
+      h += crest * river.bankHeight * 0.4 * smoothstep(34, 95, Math.abs(lateral));
     }
 
     // A drainage canal running beside the line through flat country.

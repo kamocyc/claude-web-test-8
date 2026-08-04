@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 const seed = process.argv[2] ?? '4242';
 const outDir = process.argv[3] ?? 'screenshots/tunnel';
-const url = `http://127.0.0.1:4173/?capture=1&seed=${seed}&time=11.5`;
+const url = `http://127.0.0.1:5204/?capture=1&seed=${seed}&time=11.5`;
 const executablePath = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 
 mkdirSync(outDir, { recursive: true });
@@ -23,6 +23,7 @@ const browser = await chromium.launch({
 const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
 page.on('pageerror', (error) => console.error('[page error]', error.message));
 
+page.setDefaultNavigationTimeout(180000);
 await page.goto(url, { waitUntil: 'load' });
 await page.waitForTimeout(10000);
 await page.evaluate(() => document.querySelector('.overlay .button')?.click());

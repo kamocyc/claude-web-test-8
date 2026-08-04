@@ -5,13 +5,13 @@ import {
   MeshBasicMaterial,
   MeshPhysicalMaterial,
   MeshStandardMaterial,
-  RepeatWrapping,
   Vector2,
   type IUniform,
   type Material,
   type WebGLProgramParametersWithUniforms,
 } from 'three';
 import { textures } from './TextureFactory';
+import { createGroundMaterial } from '../world/terrain/GroundMaterial';
 
 /**
  * Shared material library.
@@ -88,95 +88,13 @@ function patchWind(material: Material, amplitude: number, heightScale: number): 
 }
 
 /**
- * Terrain: grass, rock and sand blended by slope and by proximity to water,
- * with a large-scale colour variation coming from vertex colours.
+ * Terrain.
+ *
+ * The ground is involved enough to live on its own, next to the height field
+ * that feeds it: see world/terrain/GroundMaterial.
  */
 export function createTerrainMaterial(): MeshStandardMaterial {
-  const material = new MeshStandardMaterial({
-    map: textures.ground(),
-    normalMap: textures.groundNormal(),
-    normalScale: new Vector2(0.85, 0.85),
-    vertexColors: true,
-    roughness: 0.96,
-    metalness: 0,
-    side: FrontSide,
-  });
-  const rock = textures.rock();
-  const sand = textures.sand();
-  rock.wrapS = rock.wrapT = RepeatWrapping;
-  sand.wrapS = sand.wrapT = RepeatWrapping;
-
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uRockMap = { value: rock };
-    shader.uniforms.uSandMap = { value: sand };
-    shader.uniforms.uDetailScale = { value: 0.135 };
-
-    shader.vertexShader = shader.vertexShader
-      .replace(
-        '#include <common>',
-        `#include <common>
-         attribute float aSlope;
-         attribute float aShore;
-         varying vec3 vWorldPos;
-         varying float vSlope;
-         varying float vShore;`,
-      )
-      .replace(
-        '#include <begin_vertex>',
-        `#include <begin_vertex>
-         vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
-         vSlope = aSlope;
-         vShore = aShore;`,
-      );
-
-    shader.fragmentShader = shader.fragmentShader
-      .replace(
-        '#include <common>',
-        `#include <common>
-         uniform sampler2D uRockMap;
-         uniform sampler2D uSandMap;
-         uniform float uDetailScale;
-         varying vec3 vWorldPos;
-         varying float vSlope;
-         varying float vShore;`,
-      )
-      .replace(
-        '#include <map_fragment>',
-        `
-         vec2 groundUv = vWorldPos.xz * uDetailScale;
-         float viewDist = length(vWorldPos - cameraPosition);
-
-         // Three scales of the same sheet: a crisp one underfoot that fades
-         // out before it can alias, the working scale, and a very large one
-         // that varies the colour from field to field so the tiling never
-         // announces itself.
-         vec4 grassMid = texture2D(map, groundUv);
-         vec4 grassFar = texture2D(map, groundUv * 0.171);
-         vec4 grassNear = texture2D(map, groundUv * 4.3);
-         vec4 grassTex = grassMid * (0.66 + grassFar.g * 0.82);
-         grassTex = mix(grassTex, grassTex * (0.58 + grassNear.g * 0.9),
-                        0.5 * (1.0 - smoothstep(7.0, 46.0, viewDist)));
-
-         // Rock is projected sideways on anything steep, so cliffs and the
-         // batter of a cutting show strata instead of a smeared plan view.
-         vec2 rockFlat = vWorldPos.xz * uDetailScale * 0.55;
-         vec2 rockSide = vec2((vWorldPos.x + vWorldPos.z) * 0.707, vWorldPos.y) * uDetailScale * 0.8;
-         vec4 rockTex = mix(
-           texture2D(uRockMap, rockFlat),
-           texture2D(uRockMap, rockSide),
-           smoothstep(0.18, 0.55, vSlope));
-         vec4 sandTex = texture2D(uSandMap, groundUv * 1.4) * (0.72 + texture2D(uSandMap, groundUv * 0.2).g * 0.62);
-
-         // A ragged edge between turf and rock rather than a contour line.
-         float rocky = smoothstep(0.30, 0.68, vSlope + (grassFar.r - 0.5) * 0.22);
-         vec4 blended = mix(grassTex, rockTex, rocky);
-         blended = mix(blended, sandTex, vShore);
-         diffuseColor *= blended;
-        `,
-      );
-  };
-  material.customProgramCacheKey = () => 'terrain';
-  return material;
+  return createGroundMaterial();
 }
 
 let ballastMaterial: MeshStandardMaterial | null = null;
