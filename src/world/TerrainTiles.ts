@@ -6,9 +6,9 @@ import {
   type Material,
   Vector3,
 } from 'three';
-import { blendedGrassColor, SEA_LEVEL } from './Biome';
+import { blendedGrassColor } from './Biome';
 import { TerrainField } from './TerrainField';
-import { clamp01, smoothstep } from '../core/MathUtils';
+import { clamp01 } from '../core/MathUtils';
 import type { ProjectionResult } from './TerrainField';
 
 /**
@@ -176,6 +176,7 @@ export class TerrainTiles {
     const shore = new Float32Array(n * n);
     const colors = new Float32Array(n * n * 3);
     this.projection.hint = -1;
+    const tint = this.field.noise.patches;
 
     for (let j = 0; j < n; j++) {
       const z = originZ + (j - 1) * step;
@@ -186,16 +187,15 @@ export class TerrainTiles {
         const y = this.field.ground(sample, proj.lateral, x, z, true);
         const idx = j * n + i;
         heights[idx] = y;
-        shore[idx] = clamp01(
-          (1 - smoothstep(0.4, 3.4, y - SEA_LEVEL)) * smoothstep(-2.5, 0.4, y - SEA_LEVEL) * 1.15 +
-            (y < SEA_LEVEL ? 0.85 : 0),
-        );
+        shore[idx] = this.field.shoreFactor(sample, proj.lateral, y);
         const col = blendedGrassColor(sample.weights);
         // Large-scale colour variation so fields do not read as a flat wash.
-        const tint = 0.78 + this.field.noise.patches.fbm(x * 0.0016, z * 0.0016, 3) * 0.5;
-        colors[idx * 3] = col.r * tint;
-        colors[idx * 3 + 1] = col.g * tint;
-        colors[idx * 3 + 2] = col.b * tint;
+        // The material carries its own drift as well; this one is coarser and
+        // keeps neighbouring tiles from ever matching exactly.
+        const wash = 0.88 + tint.fbm(x * 0.0016, z * 0.0016, 3) * 0.28;
+        colors[idx * 3] = col.r * wash;
+        colors[idx * 3 + 1] = col.g * wash;
+        colors[idx * 3 + 2] = col.b * wash;
       }
     }
 
@@ -209,6 +209,7 @@ export class TerrainTiles {
     const vcolors = new Float32Array(total * 3);
     const slopes = new Float32Array(total);
     const shores = new Float32Array(total);
+    const cavities = new Float32Array(total);
 
     const normal = new Vector3();
     const at = (i: number, j: number) => heights[(j + 1) * n + (i + 1)];
@@ -239,6 +240,14 @@ export class TerrainTiles {
         vcolors[vi * 3 + 2] = colors[idx * 3 + 2];
         slopes[vi] = clamp01(1 - normal.y);
         shores[vi] = shore[idx];
+
+        // Curvature, as the discrete Laplacian of the height field. Positive
+        // in a hollow, negative on a crest. The material darkens the hollows
+        // and gathers scree and loose stone in them, which is most of what
+        // reads as ambient occlusion on open ground - for the cost of four
+        // samples we already had.
+        const lap = (at(i - 1, j) + at(i + 1, j) + at(i, j - 1) + at(i, j + 1)) * 0.25 - y;
+        cavities[vi] = Math.max(-1, Math.min(1, lap / (step * 0.22)));
       }
     }
 
@@ -274,6 +283,7 @@ export class TerrainTiles {
       vcolors[v * 3 + 2] = vcolors[src * 3 + 2];
       slopes[v] = slopes[src];
       shores[v] = shores[src];
+      cavities[v] = cavities[src];
       return v;
     };
 
@@ -313,6 +323,7 @@ export class TerrainTiles {
     geometry.setAttribute('color', new BufferAttribute(vcolors, 3));
     geometry.setAttribute('aSlope', new BufferAttribute(slopes, 1));
     geometry.setAttribute('aShore', new BufferAttribute(shores, 1));
+    geometry.setAttribute('aCavity', new BufferAttribute(cavities, 1));
     geometry.setIndex(indices);
     geometry.computeBoundingSphere();
 

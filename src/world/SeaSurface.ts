@@ -1,4 +1,6 @@
 import { BufferAttribute, BufferGeometry, Mesh, type ShaderMaterial } from 'three';
+import { BIOME_INDEX } from './Biome';
+import { smoothstep } from '../core/MathUtils';
 import type { TerrainField } from './TerrainField';
 
 /**
@@ -11,8 +13,10 @@ import type { TerrainField } from './TerrainField';
  */
 export class SeaSurface {
   readonly mesh: Mesh;
-  private readonly rings = 76;
-  private readonly sectors = 72;
+  // Far enough out to pass behind the fog rather than stopping short of it and
+  // leaving the sea with a visible edge at the horizon.
+  private readonly rings = 90;
+  private readonly sectors = 84;
   private readonly radii: number[] = [];
   private readonly depths: Float32Array;
   private readonly positions: Float32Array;
@@ -43,7 +47,9 @@ export class SeaSurface {
         this.positions[idx * 3] = Math.cos(theta) * r;
         this.positions[idx * 3 + 1] = 0;
         this.positions[idx * 3 + 2] = Math.sin(theta) * r;
-        this.depths[idx] = 40;
+        // Assume dry until sampled, so a newly placed grid never flashes a
+        // sheet of water across the countryside before the depths arrive.
+        this.depths[idx] = -8;
       }
     }
 
@@ -96,9 +102,24 @@ export class SeaSurface {
     for (let i = this.dirtyFrom; i < end; i++) {
       const x = this.positions[i * 3] + sx;
       const z = this.positions[i * 3 + 2] + sz;
-      const result = this.field.heightAt(x, z, hint);
-      hint = result.projection.hint;
-      this.depths[i] = Math.max(0, -result.y);
+      const proj = this.field.project(x, z, hint);
+      hint = proj.hint;
+      const sample = this.field.sampleAt(proj.s);
+      const y = this.field.ground(sample, proj.lateral, x, z);
+
+      // The open sea is not "everywhere below zero": it is the water on the
+      // seaward side of a coastal stretch. Without that test any inland hollow
+      // that happens to dip under the waterline gets an ocean laid over it.
+      const seaward = sample.seaSide !== 0 ? proj.lateral * sample.seaSide : -1e3;
+      const gate =
+        smoothstep(0.06, 0.35, sample.weights[BIOME_INDEX.coast]) * smoothstep(-90, 30, seaward);
+
+      // Signed, not clamped: carrying how far the *land* stands above the
+      // water as a negative depth lets the shader find the waterline by
+      // interpolation instead of snapping it to the nearest vertex, which is
+      // the difference between a shore and a polygon edge.
+      const depth = Math.max(-8, -y);
+      this.depths[i] = gate > 0.001 ? -8 + (depth + 8) * gate : -8;
     }
     this.dirtyFrom = end;
     const attr = this.mesh.geometry.getAttribute('aDepth') as BufferAttribute;
