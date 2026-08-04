@@ -6,6 +6,9 @@ dist/
 # Scratch output from the capture rig (tools/shots.mjs, tools/blind.mjs).
 screenshots/
 shots/
+shots-*/
+shots-before/
+probe-shots/
 
 # Agent worktrees and local harness state: checkouts of this same repo, not
 # content that belongs in it.
