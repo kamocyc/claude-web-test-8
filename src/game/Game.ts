@@ -542,8 +542,6 @@ export class Game {
     this.rain.intensity = this.sky.weather.rain * (1 - this.tunnelFactor);
     this.rain.update(dt, this.cameraPos, this.trainVelocity, lerp(0.4, 1, 1 - darkness));
 
-    const glare = this.sky.glare * (1 - this.tunnelFactor);
-    this.engine.setGrade(glare, this.sky.weather.rain * 0.8);
     // The post chain needs to know where the sun is and what colour the air
     // is, for the aerial perspective, the shafts and the time-of-day grade.
     this.engine.setEnvironment({
@@ -551,7 +549,7 @@ export class Game {
       sunColor: this.sky.sun.color,
       horizonColor: this.sky.horizon,
       zenithColor: this.zenith,
-      glare,
+      glare: this.sky.glare * (1 - this.tunnelFactor),
       wet: this.sky.weather.rain * 0.8,
       overcast: this.sky.weather.cloudCover,
       night: this.sky.nightFactor,

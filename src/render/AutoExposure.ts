@@ -122,7 +122,7 @@ export class AutoExposure {
       uniforms: {
         tCurrent: { value: null },
         tPrevious: { value: null },
-        uKey: { value: 0.42 },
+        uKey: { value: 0.46 },
         uMin: { value: 0.26 },
         uMax: { value: 2.0 },
         uUpRate: { value: 0.55 },

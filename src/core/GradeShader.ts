@@ -56,7 +56,7 @@ export const GradeShader = {
     uHighlightTint: { value: new Color(1.06, 1.0, 0.92) },
     uToneBalance: { value: 0.0 },
 
-    uVignette: { value: 0.4 },
+    uVignette: { value: 0.33 },
     uVignetteRoundness: { value: 1.0 },
     uGrain: { value: 0.03 },
     uAberration: { value: 0.85 },

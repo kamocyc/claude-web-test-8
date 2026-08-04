@@ -408,13 +408,6 @@ export class Engine {
     }
   }
 
-  /** Backwards-compatible shorthand for the windscreen effects only. */
-  setGrade(glare: number, wet: number): void {
-    this.gradePass.uniforms.uGlare.value = glare;
-    this.gradePass.uniforms.uWet.value = wet;
-    this.atmospherePass.uniforms.uGlare.value = glare * 0.4;
-  }
-
   /**
    * Feeds the pipeline the state of the world it is drawing: where the sun is,
    * what colour the air is, and what time of day the grade should be wearing.
@@ -435,6 +428,12 @@ export class Engine {
     }
 
     const g = this.gradePass.uniforms;
+    g.uGlare.value = state.glare;
+    g.uWet.value = state.wet;
+    // The veil on the lens is a fraction of the wash on the glass: the two
+    // together are what a low sun through a windscreen actually looks like,
+    // and either one alone at full strength looks like a filter.
+    this.atmospherePass.uniforms.uGlare.value = state.glare * 0.4;
     g.uSlope.value.fromArray(this.look.slope);
     g.uOffset.value.fromArray(this.look.offset);
     g.uPower.value.fromArray(this.look.power);
