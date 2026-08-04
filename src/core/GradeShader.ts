@@ -45,7 +45,9 @@ export const GradeShader = {
     uPower: { value: new Vector3(1, 1, 1) },
 
     uContrast: { value: 1.06 },
-    uContrastPivot: { value: 0.42 },
+    // Middle grey in the display-linear space AgX hands back, not 0.5: pivot
+    // any higher and raising contrast quietly darkens the whole mid-tone.
+    uContrastPivot: { value: 0.18 },
     uSaturation: { value: 1.08 },
     /** Extra saturation applied only to already-dull colours. */
     uVibrance: { value: 0.18 },
@@ -204,8 +206,10 @@ export const GradeShader = {
       color = max(color * uSlope + uOffset, vec3(0.0));
       color = pow(color, uPower);
 
-      // Contrast about a filmic pivot rather than 0.5: pivoting at middle grey
-      // keeps skies from clipping when contrast goes up.
+      // Contrast about middle grey rather than 0.5. AgX returns
+      // display-linear values, where middle grey sits at 0.18, so pivoting
+      // where a naive grade would puts a third of a stop of unintended
+      // darkening across everything.
       color = max(
         (color - uContrastPivot) * uContrast + uContrastPivot,
         vec3(0.0)

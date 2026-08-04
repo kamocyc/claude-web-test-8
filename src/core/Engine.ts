@@ -355,6 +355,7 @@ export class Engine {
     const full = this.postStage === 'full';
 
     this.scenePass.setSimple(!full);
+    this.scenePass.setDepthEnabled(p.ao || p.atmosphere || p.godRays);
 
     const wantAo = full && p.ao;
     const wantAtmosphere = full && p.atmosphere;

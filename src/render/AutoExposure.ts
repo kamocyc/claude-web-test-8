@@ -11,7 +11,7 @@ import {
   type WebGLRenderer,
 } from 'three';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
-import { FULLSCREEN_VERTEX, LUMINANCE } from './ShaderChunks';
+import { FULLSCREEN_VERTEX, LUMINANCE, SANITISE } from './ShaderChunks';
 
 /**
  * Eye adaptation.
@@ -70,12 +70,17 @@ export class AutoExposure {
         uniform sampler2D tDiffuse;
         varying vec2 vUv;
         ${LUMINANCE}
+        ${SANITISE}
         void main() {
-          vec3 c = max(texture2D(tDiffuse, vUv).rgb, vec3(0.0));
-          float l = lumaOf(c);
-          // Reject the extreme highlight of the solar disc so a glance at the
-          // sun does not stop the whole landscape down.
-          l = min(l, 12.0);
+          // The meter reads the raw scene target, ahead of the scrub the blit
+          // does, so it has to do its own.
+          vec3 c = sanitise(texture2D(tDiffuse, vUv).rgb);
+          // Bound the meter at both ends. The ceiling stops a glance at the
+          // solar disc from stopping the whole landscape down; the floor
+          // matters just as much, because a log average is dominated by its
+          // darkest samples and a frame with a strip of shadowed ballast
+          // across it would otherwise open up until the sky was gone.
+          float l = clamp(lumaOf(c), 0.012, 12.0);
           vec2 d = vUv - vec2(0.5, 0.42);
           float centre = exp(-dot(d, d) * 3.4);
           float sky = 1.0 - 0.6 * smoothstep(0.55, 0.95, vUv.y);
@@ -118,8 +123,8 @@ export class AutoExposure {
         tCurrent: { value: null },
         tPrevious: { value: null },
         uKey: { value: 0.42 },
-        uMin: { value: 0.34 },
-        uMax: { value: 2.3 },
+        uMin: { value: 0.26 },
+        uMax: { value: 2.0 },
         uUpRate: { value: 0.55 },
         uDownRate: { value: 2.4 },
         uDelta: { value: 0.016 },

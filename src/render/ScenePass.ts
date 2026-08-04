@@ -15,7 +15,7 @@ import {
   type WebGLRenderer,
 } from 'three';
 import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
-import { FULLSCREEN_VERTEX } from './ShaderChunks';
+import { FULLSCREEN_VERTEX, SANITISE } from './ShaderChunks';
 
 /**
  * Draws the world into a half-float colour target that also carries a
@@ -41,6 +41,7 @@ export class ScenePass extends Pass {
   private width = 1;
   private height = 1;
   private simpleMode = false;
+  private wantDepth = true;
 
   constructor(
     private readonly scene: Scene,
@@ -52,9 +53,15 @@ export class ScenePass extends Pass {
       uniforms: { tDiffuse: { value: null } },
       vertexShader: FULLSCREEN_VERTEX,
       fragmentShader: /* glsl */ `
+        precision highp float;
         uniform sampler2D tDiffuse;
         varying vec2 vUv;
-        void main() { gl_FragColor = texture2D(tDiffuse, vUv); }
+        ${SANITISE}
+        void main() {
+          // The one place every pixel passes through, so the one place worth
+          // scrubbing: everything downstream can then assume finite values.
+          gl_FragColor = vec4(sanitise(texture2D(tDiffuse, vUv).rgb), 1.0);
+        }
       `,
       depthTest: false,
       depthWrite: false,
@@ -83,6 +90,20 @@ export class ScenePass extends Pass {
     else this.ensureTarget();
   }
 
+  /**
+   * Attaching a depth texture is only worth it when something downstream is
+   * going to read it. On the low profile nothing does, and a depth attachment
+   * that is never sampled is memory and bandwidth for nothing.
+   */
+  setDepthEnabled(enabled: boolean): void {
+    if (this.wantDepth === enabled) return;
+    this.wantDepth = enabled;
+    if (this.target) {
+      this.releaseTarget();
+      this.ensureTarget();
+    }
+  }
+
   private releaseTarget(): void {
     this.target?.dispose();
     this.depthTexture?.dispose();
@@ -92,10 +113,6 @@ export class ScenePass extends Pass {
 
   private ensureTarget(): void {
     if (this.simpleMode || this.target) return;
-    const depth = new DepthTexture(this.width, this.height, UnsignedIntType);
-    depth.format = DepthFormat;
-    depth.minFilter = NearestFilter;
-    depth.magFilter = NearestFilter;
     const target = new WebGLRenderTarget(this.width, this.height, {
       type: HalfFloatType,
       format: RGBAFormat,
@@ -106,8 +123,14 @@ export class ScenePass extends Pass {
       colorSpace: NoColorSpace,
     });
     target.texture.name = 'ScenePass.hdr';
-    target.depthTexture = depth;
-    this.depthTexture = depth;
+    if (this.wantDepth) {
+      const depth = new DepthTexture(this.width, this.height, UnsignedIntType);
+      depth.format = DepthFormat;
+      depth.minFilter = NearestFilter;
+      depth.magFilter = NearestFilter;
+      target.depthTexture = depth;
+      this.depthTexture = depth;
+    }
     this.target = target;
   }
 

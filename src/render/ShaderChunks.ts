@@ -83,6 +83,27 @@ export const NOISE_UTILS = /* glsl */ `
   }
 `;
 
+/**
+ * Guards the HDR pipeline against a single bad pixel.
+ *
+ * A NaN or an infinity anywhere in the scene used to be harmless: ACES ended
+ * in a saturate() and swallowed it. It is not harmless here - the bloom
+ * prefilter divides by luminance, so one infinite pixel becomes a NaN, the mip
+ * pyramid spreads that NaN over a wide neighbourhood, and the frame comes back
+ * with a ragged black hole in it. The comparison is written the way it is
+ * because it is false for NaN as well as for infinity, so one test catches
+ * both.
+ */
+export const SANITISE = /* glsl */ `
+  vec3 sanitise(vec3 c) {
+    // equal(c, c) is false only for NaN, so this drops NaNs to black and
+    // leaves everything else alone; the clamp then folds infinities down to
+    // the ceiling instead of turning them into holes.
+    c = mix(vec3(0.0), c, vec3(equal(c, c)));
+    return clamp(c, 0.0, 64.0);
+  }
+`;
+
 export const LUMINANCE = /* glsl */ `
   // Named to stay clear of the luminance() three.js injects into every program.
   float lumaOf(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }

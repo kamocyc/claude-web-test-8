@@ -32,6 +32,16 @@ await page.goto(
 await page.waitForTimeout(12000);
 await page.evaluate(() => document.querySelector('.overlay .button')?.click());
 await page.waitForTimeout(8000);
+const biome = process.env.PROBE_BIOME;
+if (biome) {
+  await page.evaluate((b) => {
+    for (let i = 0; i < 24; i++) {
+      if (window.game.world.track.biomeAt(window.game.train.position) === b) break;
+      window.game.skipToNextBiome();
+    }
+  }, biome);
+  await page.waitForTimeout(15000);
+}
 const mode = process.env.PROBE_MODE;
 const shot = process.env.PROBE_SHOT;
 if (mode) await page.evaluate((m) => window.game.camera.setMode(m), mode);

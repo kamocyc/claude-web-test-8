@@ -12,7 +12,7 @@ import {
   type WebGLRenderer,
 } from 'three';
 import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
-import { FULLSCREEN_VERTEX, LUMINANCE } from './ShaderChunks';
+import { FULLSCREEN_VERTEX, LUMINANCE, SANITISE } from './ShaderChunks';
 
 /**
  * Wide, soft, energy-conserving bloom on a mip pyramid.
@@ -84,8 +84,9 @@ export class BloomPass extends Pass {
         uniform float uClamp;
         varying vec2 vUv;
         ${LUMINANCE}
+        ${SANITISE}
 
-        vec3 tap(vec2 uv) { return max(texture2D(tDiffuse, uv).rgb, vec3(0.0)); }
+        vec3 tap(vec2 uv) { return sanitise(texture2D(tDiffuse, uv).rgb); }
 
         void main() {
           // A four-tap box on the way down halves the aliasing of thin bright
