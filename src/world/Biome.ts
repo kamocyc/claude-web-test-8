@@ -1,7 +1,8 @@
-import { Color, LinearSRGBColorSpace } from 'three';
+import { Color } from 'three';
 import { Noise2D } from '../core/Random';
 import { clamp, lerp, smoothstep } from '../core/MathUtils';
 import { drainage, ridgedMulti, terrace, terraceScarp, warpedFbm } from './terrain/Landform';
+import { FastNoise2D } from './terrain/FastNoise';
 
 /**
  * Biomes drive everything about a stretch of line: how the land is shaped,
@@ -286,12 +287,12 @@ export class TerrainNoise {
   readonly scatter: Noise2D;
 
   constructor(seed: number) {
-    this.hills = new Noise2D(seed ^ 0x1a2b);
-    this.detail = new Noise2D(seed ^ 0x51d3);
-    this.ridges = new Noise2D(seed ^ 0x9e37);
-    this.micro = new Noise2D(seed ^ 0xc0ff);
-    this.patches = new Noise2D(seed ^ 0x77aa);
-    this.scatter = new Noise2D(seed ^ 0x3f19);
+    this.hills = new FastNoise2D(seed ^ 0x1a2b);
+    this.detail = new FastNoise2D(seed ^ 0x51d3);
+    this.ridges = new FastNoise2D(seed ^ 0x9e37);
+    this.micro = new FastNoise2D(seed ^ 0xc0ff);
+    this.patches = new FastNoise2D(seed ^ 0x77aa);
+    this.scatter = new FastNoise2D(seed ^ 0x3f19);
   }
 }
 
@@ -345,12 +346,13 @@ export function biomeElevation(def: BiomeDef, q: TerrainQuery, n: TerrainNoise):
       // The line takes the valley floor, so the ground stays low beside it and
       // climbs hard once it is clear of the alignment.
       h += def.relief * 0.4 * smoothstep(60, 460, ax) * roll;
-      // Gullies cut down the flanks and the spoil fans out at the foot.
-      const gully = drainage(n.patches, nx * 2.7, nz * 2.7, 3);
-      h -= def.relief * 0.14 * gully * fine;
+      if (fine > 0.004) {
+        // Gullies cut down the flanks and the spoil fans out at the foot.
+        h -= def.relief * 0.14 * drainage(n.patches, nx * 2.7, nz * 2.7, 3) * fine;
+      }
       // Benches: harder beds standing out of the hillside, with scree between.
       const bench = 0.42 * smoothstep(0.34, 0.78, ridge) * smoothstep(150, 360, ax);
-      h = lerp(h, terrace(h, 27, 3), bench);
+      if (bench > 0.004) h = lerp(h, terrace(h, 27, 3), bench);
       break;
     }
 
@@ -360,8 +362,8 @@ export function biomeElevation(def: BiomeDef, q: TerrainQuery, n: TerrainNoise):
       const base = warpedFbm(n.hills, n.detail, nx, nz, 4, 0.85);
       h = q.trackY + def.relief * base * away;
       h += def.relief * 0.34 * ridgedMulti(n.ridges, nx * 0.85, nz * 0.85, 3) * away;
-      const valley = drainage(n.patches, nx * 1.75, nz * 1.75, 3);
-      h -= def.relief * 0.44 * valley * smoothstep(40, 230, ax);
+      const cut = smoothstep(40, 230, ax);
+      if (cut > 0.004) h -= def.relief * 0.44 * drainage(n.patches, nx * 1.75, nz * 1.75, 3) * cut;
       break;
     }
 
@@ -381,11 +383,13 @@ export function biomeElevation(def: BiomeDef, q: TerrainQuery, n: TerrainNoise):
       const roll = n.hills.fbm(nx, nz, 3);
       h = q.trackY + def.relief * roll * away;
       h += terraceScarp(n.patches, q.worldX, q.worldZ, 0.00082, 7.5) * smoothstep(30, 260, ax);
-      h -= drainage(n.detail, q.worldX * 0.0022, q.worldZ * 0.0022, 2) * 2.4 * fine;
-      // Rice ground is not a slope, it is a staircase: every pan is level and
-      // held by a bund, and the risers follow the contour. Half a metre a step
-      // is what a Japanese valley floor actually looks like.
-      h = lerp(h, terrace(h, 0.55, 3), 0.85 * fine);
+      if (fine > 0.004) {
+        h -= drainage(n.detail, q.worldX * 0.0022, q.worldZ * 0.0022, 2) * 2.4 * fine;
+        // Rice ground is not a slope, it is a staircase: every pan is level and
+        // held by a bund, and the risers follow the contour. Half a metre a
+        // step is what a Japanese valley floor actually looks like.
+        h = lerp(h, terrace(h, 0.55, 3), 0.85 * fine);
+      }
       break;
     }
 
@@ -394,8 +398,10 @@ export function biomeElevation(def: BiomeDef, q: TerrainQuery, n: TerrainNoise):
       const roll = warpedFbm(n.hills, n.detail, nx, nz, 3, 0.6);
       h = q.trackY + def.relief * roll * away;
       h += terraceScarp(n.patches, q.worldX, q.worldZ, 0.0011, 9.0) * smoothstep(40, 320, ax);
-      h -= drainage(n.detail, q.worldX * 0.0026, q.worldZ * 0.0026, 2) * 3.2 * fine;
-      h = lerp(h, terrace(h, 0.6, 3), 0.5 * fine);
+      if (fine > 0.004) {
+        h -= drainage(n.detail, q.worldX * 0.0026, q.worldZ * 0.0026, 2) * 3.2 * fine;
+        h = lerp(h, terrace(h, 0.6, 3), 0.5 * fine);
+      }
       break;
     }
 
@@ -450,15 +456,32 @@ export function blendedElevation(
   let total = 0;
   for (let i = 0; i < BIOME_IDS.length; i++) {
     const w = weights[i];
-    if (w <= 0.001) continue;
+    // Below a couple of per cent a biome cannot move the ground far enough to
+    // see, and every one of these costs a dozen noise samples.
+    if (w <= 0.02) continue;
     sum += w * biomeElevation(defs[BIOME_IDS[i]], q, n);
     total += w;
   }
   return total > 0 ? sum / total : q.trackY;
 }
 
-const tmpColor = new Color();
 const outColor = new Color();
+
+/**
+ * Biome tints, unpacked once.
+ *
+ * This is read for every vertex of every terrain tile - hundreds of thousands
+ * a second while the world streams - so it must not be doing colour space
+ * conversions per call.
+ */
+const TINTS: number[][] = BIOME_IDS.map((id) => {
+  const hex = defs[id].grassColor;
+  return [
+    ((hex >> 16) & 255) / 255,
+    ((hex >> 8) & 255) / 255,
+    (hex & 255) / 255,
+  ];
+});
 
 /**
  * Neutral point of the ground tint. The tint multiplies an already-coloured
@@ -470,18 +493,21 @@ const TINT_GAIN = 2;
 
 /** Ground tint for a blend of biomes, used for terrain vertex colours. */
 export function blendedGrassColor(weights: Float32Array, target = outColor): Color {
-  target.setRGB(0, 0, 0);
+  let r = 0;
+  let g = 0;
+  let b = 0;
   let total = 0;
-  for (let i = 0; i < BIOME_IDS.length; i++) {
+  for (let i = 0; i < TINTS.length; i++) {
     const w = weights[i];
     if (w <= 0.001) continue;
-    tmpColor.setHex(defs[BIOME_IDS[i]].grassColor, LinearSRGBColorSpace);
-    target.r += tmpColor.r * w;
-    target.g += tmpColor.g * w;
-    target.b += tmpColor.b * w;
+    const t = TINTS[i];
+    r += t[0] * w;
+    g += t[1] * w;
+    b += t[2] * w;
     total += w;
   }
-  if (total > 0) target.multiplyScalar(TINT_GAIN / total);
+  const k = total > 0 ? TINT_GAIN / total : 0;
+  target.setRGB(r * k, g * k, b * k);
   return target;
 }
 

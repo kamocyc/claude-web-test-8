@@ -27,14 +27,21 @@ interface TileLevel {
   radius: number;
 }
 
+// Ring sizes are a budget as much as a quality setting: a tile of the finest
+// level costs as many height samples as one of the coarsest and covers a
+// two-hundred-and-fiftieth of the ground, so the fine rings are kept tight and
+// the coarse ones carry the distance.
 const LEVELS: TileLevel[] = [
-  { size: 128, segments: 32, radius: 3 },
-  { size: 256, segments: 32, radius: 3 },
-  { size: 512, segments: 28, radius: 3 },
-  { size: 1024, segments: 20, radius: 3 },
+  // The finest ring is almost entirely hidden under the track-space corridor
+  // mesh, so its resolution buys very little; the material carries the close
+  // detail now, not the mesh.
+  { size: 128, segments: 24, radius: 2 },
+  { size: 256, segments: 24, radius: 3 },
+  { size: 512, segments: 24, radius: 3 },
+  { size: 1024, segments: 20, radius: 2 },
   // Coarse enough and a distant ridge turns into a row of facets against the
   // sky, which is the first thing that gives a generated landscape away.
-  { size: 2048, segments: 16, radius: 3 },
+  { size: 2048, segments: 16, radius: 2 },
 ];
 
 interface Tile {
@@ -137,7 +144,12 @@ export class TerrainTiles {
     for (let i = this.pending.length - 1; i >= 0; i--) {
       if (!wanted.has(this.pending[i].key)) this.pending.splice(i, 1);
     }
-    this.pending.sort((a, b) => b.priority - a.priority); // build nearest last-in/first-out
+    // Build nearest first, but with a large head start for the coarse levels:
+    // one 2 km tile covers as much ground as sixteen thousand of the finest
+    // ones for a twentieth of the samples, and a hole at the horizon is not a
+    // low-detail patch, it is a window through the world to the sky.
+    const key = (t: { priority: number; level: number }) => t.priority - t.level * 900;
+    this.pending.sort((a, b) => key(b) - key(a)); // last-in/first-out
   }
 
   /** Builds queued tiles until the time budget for this frame is used up. */
@@ -177,25 +189,44 @@ export class TerrainTiles {
     const colors = new Float32Array(n * n * 3);
     this.projection.hint = -1;
     const tint = this.field.noise.patches;
+    // Projecting onto the centre line is the expensive part of building a
+    // tile, and the search only has to reach as far as one cell of this tile
+    // can move along the line. A coarse tile needs a wide window; the fine
+    // ones nearest the camera - which are most of the samples - need very
+    // little, so this is worth several milliseconds a tile.
+    const window = Math.max(8, Math.min(48, Math.round(step * 0.5) + 6));
+    let tintHint = -2;
+    let tintR = 1;
+    let tintG = 1;
+    let tintB = 1;
 
     for (let j = 0; j < n; j++) {
       const z = originZ + (j - 1) * step;
       for (let i = 0; i < n; i++) {
         const x = originX + (i - 1) * step;
-        const proj = this.field.project(x, z, this.projection.hint, this.projection);
+        const proj = this.field.project(x, z, this.projection.hint, this.projection, window);
         const sample = this.field.sampleAt(proj.s);
         const y = this.field.ground(sample, proj.lateral, x, z, true);
         const idx = j * n + i;
         heights[idx] = y;
         shore[idx] = this.field.shoreFactor(sample, proj.lateral, y);
-        const col = blendedGrassColor(sample.weights);
+        // The tint only changes with the biome blend, which moves along the
+        // line, not across it - so it is recomputed when the projection lands
+        // on a different stored sample and reused otherwise.
+        if (proj.hint !== tintHint) {
+          tintHint = proj.hint;
+          const col = blendedGrassColor(sample.weights);
+          tintR = col.r;
+          tintG = col.g;
+          tintB = col.b;
+        }
         // Large-scale colour variation so fields do not read as a flat wash.
         // The material carries its own drift as well; this one is coarser and
         // keeps neighbouring tiles from ever matching exactly.
-        const wash = 0.88 + tint.fbm(x * 0.0016, z * 0.0016, 3) * 0.28;
-        colors[idx * 3] = col.r * wash;
-        colors[idx * 3 + 1] = col.g * wash;
-        colors[idx * 3 + 2] = col.b * wash;
+        const wash = 0.88 + tint.fbm(x * 0.0016, z * 0.0016, 2) * 0.28;
+        colors[idx * 3] = tintR * wash;
+        colors[idx * 3 + 1] = tintG * wash;
+        colors[idx * 3 + 2] = tintB * wash;
       }
     }
 

@@ -87,15 +87,15 @@ export class TerrainField {
    * Pass the previous result's `hint` when querying a coherent run of points -
    * it turns the search into a short local scan.
    */
-  project(x: number, z: number, hint = -1, out?: ProjectionResult): ProjectionResult {
+  project(x: number, z: number, hint = -1, out?: ProjectionResult, window = 48): ProjectionResult {
     const track = this.track;
     const count = track.sampleCount;
     let best = -1;
     let bestDist = Infinity;
 
     if (hint >= 0) {
-      const lo = Math.max(0, hint - 48);
-      const hi = Math.min(count - 1, hint + 48);
+      const lo = Math.max(0, hint - window);
+      const hi = Math.min(count - 1, hint + window);
       for (let i = lo; i <= hi; i++) {
         const sm = track.at(i);
         const d = (sm.x - x) * (sm.x - x) + (sm.z - z) * (sm.z - z);
@@ -106,7 +106,7 @@ export class TerrainField {
       }
       // If the hint region did not contain a clear minimum, fall through to the
       // coarse search below.
-      if (best > lo && best < hi) return this.refine(x, z, best, out);
+      if (best > lo && best < hi) return this.refine(x, z, best, out, window);
     }
 
     for (const i of this.coarse) {
@@ -120,11 +120,18 @@ export class TerrainField {
     return this.refine(x, z, Math.max(0, best), out);
   }
 
-  private refine(x: number, z: number, start: number, out?: ProjectionResult): ProjectionResult {
+  private refine(
+    x: number,
+    z: number,
+    start: number,
+    out?: ProjectionResult,
+    window = this.coarseStride,
+  ): ProjectionResult {
     const track = this.track;
     const count = track.sampleCount;
-    const lo = Math.max(0, start - this.coarseStride);
-    const hi = Math.min(count - 1, start + this.coarseStride);
+    const span = Math.max(6, Math.min(this.coarseStride, window));
+    const lo = Math.max(0, start - span);
+    const hi = Math.min(count - 1, start + span);
     let best = start;
     let bestDist = Infinity;
     for (let i = lo; i <= hi; i++) {

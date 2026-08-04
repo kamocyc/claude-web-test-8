@@ -90,21 +90,21 @@ const groundChunk = /* glsl */ `
                         + ridgeTop * 0.28 - hollow * 0.45, 0.0, 1.0);
   float wear = clamp(vMeso.g * 1.5 + vFine.g * 0.6 - 1.28
                      + smoothstep(0.10, 0.36, slope) * 0.55, 0.0, 1.0);
-  // Loose stone gathers where the ground steepens and again at the foot of it.
-  float stony = clamp(smoothstep(0.14, 0.40, slope) * 0.9
-                      + hollow * smoothstep(0.06, 0.24, slope) * 1.4
-                      + (vMacro.a - 0.55) * 1.1
-                      + smoothstep(320.0, 900.0, alt) * 0.6, 0.0, 1.0);
+  // Loose stone is the exception, not the rule: it wants ground steep enough
+  // for nothing to hold on, or the hollow at the foot of ground like that.
+  float stony = clamp(smoothstep(0.22, 0.52, slope) * 0.85
+                      + hollow * smoothstep(0.12, 0.34, slope) * 1.1
+                      + (vMacro.a - 0.80) * 0.9, 0.0, 1.0);
   float shore = clamp(vShoreW, 0.0, 1.0);
 
   float wGrass  = (1.0 - dryness * 0.75) * (1.0 - wear * 0.8) * (1.0 - stony * 0.8) * 1.12;
   float wDry    = dryness * (1.0 - wear * 0.5) * (1.0 - stony * 0.6);
   float wSoil   = wear * (0.55 + dryness * 0.45);
-  float wGravel = max(stony, shore * 1.5 * (1.0 - low));
   // Sand belongs at the waterline. The same attribute marks the gravel cess
   // beside the running line, which is stone, not beach - so the two are split
   // by how far above the water they sit.
   float low = 1.0 - smoothstep(0.6, 7.0, alt);
+  float wGravel = max(stony, shore * 1.5 * (1.0 - low));
   float wSand   = shore * 1.7 * low;
   wGrass = max(wGrass, 0.02);
 
@@ -146,10 +146,14 @@ const groundChunk = /* glsl */ `
   float macro = 0.60 + m0.a * 0.82;
   albedo *= mix(1.0, macro, 0.7);
 
-  // A slow colour drift across the whole landscape - warmer here, greener
-  // there - which is what a real field system looks like from a train.
+  // Two scales of colour drift. The wide one says what kind of country this
+  // is; the field-sized one is what stops the middle distance - where the
+  // detail sheet has gone into its mipmaps - from flattening into a wash.
   vec3 drift = vec3(0.94 + vMacro.b * 0.20, 0.95 + vMacro.g * 0.14, 0.90 + vMacro.r * 0.22);
-  albedo *= mix(vec3(1.0), drift, 0.85);
+  vec3 field = mix(vec3(0.88, 0.94, 0.82), vec3(1.14, 1.05, 1.10), vMeso.r)
+             * mix(vec3(1.0), vec3(1.10, 0.99, 0.84), vMeso.a);
+  albedo *= mix(vec3(1.0), drift, 0.85) * mix(vec3(1.0), field, 0.8);
+  albedo *= 0.84 + vMeso.b * 0.38;
 
   vec2 nrm = (surf.xy - 0.5) * 2.0;
   gGroundRough = surf.z;
@@ -157,9 +161,9 @@ const groundChunk = /* glsl */ `
 
   // --- rock, projected on three planes ------------------------------------
   float rockNoise = (vMeso.b - 0.5) * 0.30 + (vFine.b - 0.5) * 0.12;
-  float rocky = smoothstep(0.30, 0.66, slope + rockNoise)
-              * (0.55 + 0.45 * smoothstep(0.0, 260.0, alt));
-  rocky = max(rocky, smoothstep(0.62, 0.82, slope));
+  float rocky = smoothstep(0.42, 0.78, slope + rockNoise)
+              * (0.5 + 0.5 * smoothstep(0.0, 260.0, alt));
+  rocky = max(rocky, smoothstep(0.66, 0.86, slope));
   rocky *= 1.0 - shore * 0.7;
 
   float rs = uDetailScale * 0.62;
@@ -221,10 +225,10 @@ const groundChunk = /* glsl */ `
   // --- rebuild the shading normal in world space ---------------------------
   vec3 tx = normalize(cross(gn, vec3(0.0, 0.0, 1.0)) + vec3(1e-5, 0.0, 0.0));
   vec3 tz = cross(tx, gn);
-  float bump = mix(0.75, 1.35, 1.0 - smoothstep(20.0, 220.0, viewDist));
+  float bump = mix(0.6, 1.05, 1.0 - smoothstep(20.0, 220.0, viewDist));
   gGroundNormal = normalize(gn + (tx * nrm.x + tz * nrm.y) * bump);
 
-  diffuseColor.rgb *= albedo * 1.28;
+  diffuseColor.rgb *= albedo * 1.12;
 `;
 
 let material: MeshStandardMaterial | null = null;

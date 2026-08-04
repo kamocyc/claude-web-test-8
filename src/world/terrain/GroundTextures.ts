@@ -179,9 +179,9 @@ const gravelLayer: LayerFn = (x, y) => {
   const tone = 0.55 + big.id * 0.5 + small.id * 0.18;
   const v = clamp01((0.30 + face * 0.5 + grit * 0.16) * tone - dust * 0.08);
   const warm = 0.94 + big.id * 0.16;
-  const r = lerp(0.020, 0.190, v) * warm;
-  const g = lerp(0.020, 0.178, v);
-  const b = lerp(0.019, 0.162, v) * (1.04 - big.id * 0.1);
+  const r = lerp(0.016, 0.132, v) * warm;
+  const g = lerp(0.016, 0.124, v);
+  const b = lerp(0.015, 0.115, v) * (1.04 - big.id * 0.1);
   const h = clamp01(face * 0.9 + grit * 0.2);
   return { r, g, b, h, rough: 0.86 + dust * 0.12, ao: clamp01(0.3 + h * 0.8) };
 };
@@ -194,9 +194,9 @@ const sandLayer: LayerFn = (x, y) => {
   const shell = smoothstep(0.88, 0.97, tileCells(x / 5, y / 5, 51, 131).id);
 
   const v = clamp01(0.52 + ripple * 0.26 + drift * 0.14 + grain * 0.12 + shell * 0.3);
-  const r = lerp(0.075, 0.330, v);
-  const g = lerp(0.062, 0.280, v);
-  const b = lerp(0.042, 0.196, v);
+  const r = lerp(0.052, 0.196, v);
+  const g = lerp(0.044, 0.168, v);
+  const b = lerp(0.031, 0.120, v);
   const h = clamp01(ripple * 0.7 + grain * 0.25);
   return { r, g, b, h, rough: 0.9 - shell * 0.2, ao: clamp01(0.62 + h * 0.4) };
 };
@@ -215,9 +215,9 @@ const rockLayer: LayerFn = (x, y) => {
 
   const tone = 0.78 + block.id * 0.44;
   const v = clamp01((0.30 + grain * 0.34 + fine * 0.13 + bedLine * 0.1) * tone - joint * 0.26);
-  let r = lerp(0.016, 0.165, v) * 1.02;
-  let g = lerp(0.016, 0.155, v);
-  let b = lerp(0.016, 0.150, v) * 1.02;
+  let r = lerp(0.013, 0.118, v) * 1.02;
+  let g = lerp(0.013, 0.111, v);
+  let b = lerp(0.013, 0.107, v) * 1.02;
   if (lichen > 0) {
     r = lerp(r, r * 0.86 + 0.014, lichen * 0.55);
     g = lerp(g, g * 1.02 + 0.022, lichen * 0.55);
