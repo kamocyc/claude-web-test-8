@@ -108,7 +108,9 @@ const FOG_FRAGMENT = /* glsl */ `
     // Blue is scattered out of the beam hardest, which is what turns a distant
     // ridge the colour of the sky behind it.
     vec3 extinction = vec3(0.78, 0.90, 1.06) * sigma * uAerialStrength;
-    vec3 transmittance = exp(-extinction * depth);
+    // A floor on the transmittance keeps a distant ridge as a shape rather
+    // than dissolving it into a flat white field.
+    vec3 transmittance = max(exp(-extinction * depth), vec3(0.075));
 
     vec3 skyCol = skyRadiance(uAerialSkyLut, uAerialSkyTexel, fogDir, uAerialSunDir, uAerialSunTint);
     // Below the horizon there is land, not sky, so the haze there takes the

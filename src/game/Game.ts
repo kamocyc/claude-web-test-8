@@ -212,6 +212,7 @@ export class Game {
     this.rain.dispose();
     this.engine.scene.remove(this.sky.sun);
     this.engine.scene.remove(this.sky.moon);
+    this.sky.dispose();
   }
 
   restart(seed?: number): void {

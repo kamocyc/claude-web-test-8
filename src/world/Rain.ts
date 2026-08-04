@@ -65,7 +65,7 @@ const STREAK_VERTEX = /* glsl */ `
     vec2 axis = length(velView.xy) > 1e-4 ? normalize(velView.xy) : vec2(0.0, -1.0);
     vec2 perp = vec2(-axis.y, axis.x);
 
-    float len = mix(uLength * (0.5 + aSpeed * 0.05), uWidth * 1.6, uSnow);
+    float len = mix(uLength * (0.6 + aSpeed * 0.055), uWidth * 1.6, uSnow);
     float wide = uWidth * mix(1.0, 2.6 + aSeed * 1.5, uSnow);
     mv.xy += axis * (position.y * len) + perp * (position.x * wide);
 
@@ -73,7 +73,7 @@ const STREAK_VERTEX = /* glsl */ `
     vQuad = position.xy * 2.0;
     // Fade in at the far edge of the block so drops do not pop into being.
     float d = -mv.z;
-    vFade = smoothstep(1.2, 3.0, d) * (1.0 - smoothstep(24.0, 38.0, d));
+    vFade = smoothstep(0.4, 1.6, d) * (1.0 - smoothstep(20.0, 34.0, d));
     vSeed = aSeed;
   }
 `;
@@ -91,7 +91,7 @@ const STREAK_FRAGMENT = /* glsl */ `
     // A streak is a thin bright core with soft shoulders; a flake is a disc.
     float across = 1.0 - abs(vQuad.x);
     float along = 1.0 - abs(vQuad.y);
-    float streak = smoothstep(0.0, 0.85, across) * smoothstep(0.0, 0.35, along);
+    float streak = smoothstep(0.0, 0.9, across) * smoothstep(0.0, 0.55, along);
     float flake = smoothstep(1.0, 0.15, length(vQuad));
     float a = mix(streak, flake, uSnow);
     a *= uOpacity * vFade * (0.55 + fract(vSeed * 7.31) * 0.75);
@@ -163,7 +163,7 @@ function instancedQuad(count: number): InstancedBufferGeometry {
 export class Rain {
   readonly points = new Group();
 
-  private readonly streakCount = 4200;
+  private readonly streakCount = 9000;
   private readonly splashCount = 420;
   private readonly extent = 30;
 
@@ -276,12 +276,12 @@ export class Rain {
 
     const snow = this.snow;
     const strength = Math.min(1, this.intensity);
-    this.streakMaterial.uniforms.uOpacity.value = strength * (snow > 0.5 ? 0.9 : 0.85);
+    this.streakMaterial.uniforms.uOpacity.value = strength * (snow > 0.5 ? 0.9 : 0.46);
     this.streakMaterial.uniforms.uSnow.value = snow;
     this.streakMaterial.uniforms.uTime.value = elapsed;
-    this.streakMaterial.uniforms.uLength.value = snow > 0.5 ? 0.12 : 0.75 + strength * 0.6;
-    this.streakMaterial.uniforms.uWidth.value = snow > 0.5 ? 0.05 : 0.055;
-    this.colour.setRGB(0.78, 0.84, 0.95).multiplyScalar(Math.max(light, 0.15) * 1.7);
+    this.streakMaterial.uniforms.uLength.value = snow > 0.5 ? 0.12 : 0.30 + strength * 0.22;
+    this.streakMaterial.uniforms.uWidth.value = snow > 0.5 ? 0.05 : 0.026;
+    this.colour.setRGB(0.78, 0.84, 0.95).multiplyScalar(Math.max(light, 0.15) * 1.5);
     (this.streakMaterial.uniforms.uColor.value as Vector3).set(
       this.colour.r,
       this.colour.g,

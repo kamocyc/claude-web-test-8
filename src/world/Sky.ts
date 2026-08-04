@@ -208,23 +208,25 @@ function cloudLook(w: ResolvedWeather): {
   absorption: number;
   detail: number;
   cirrus: number;
+  floor: number;
 } {
   const storm = clamp01(w.rain * 1.2);
   const overcast = smoothstep(0.6, 0.95, w.cloudCover);
   // Fair weather cumulus lift and shrink as the sky clears; an overcast sky
   // drops to a flat sheet just above the hills; rain brings it lower still and
   // turns it into something with a lot of water in it.
-  const type = lerp(lerp(1, 0.25, overcast), 0.55, storm);
-  const bottom = lerp(lerp(1500, 780, overcast), 460, storm) + w.fog * -200;
-  const top = lerp(lerp(2900, 1750, overcast), 4200, storm);
+  const type = lerp(lerp(1, 0.25, overcast), 0.3, storm);
+  const bottom = lerp(lerp(1500, 780, overcast), 420, storm) + w.fog * -200;
+  const top = lerp(lerp(2900, 1750, overcast), 3000, storm);
   return {
     type,
     bottom,
     top,
-    density: lerp(1, 1.5, overcast) * lerp(1, 1.5, storm),
-    absorption: lerp(1, 1.35, overcast) * lerp(1, 1.6, storm),
+    density: lerp(1, 1.5, overcast) * lerp(1, 1.9, storm),
+    absorption: lerp(1, 1.35, overcast) * lerp(1, 2.2, storm),
     detail: lerp(0.34, 0.2, overcast),
     cirrus: lerp(0.38, 0.0, smoothstep(0.2, 0.62, w.cloudCover)),
+    floor: clamp01(overcast * 0.55 + storm * 0.25),
   };
 }
 

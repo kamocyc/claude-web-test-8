@@ -79,6 +79,7 @@ const CLOUD_FRAGMENT = /* glsl */ `
   uniform float uAbsorption;  // extra darkening for storm cloud
   uniform float uDetailStrength;
   uniform float uCirrus;
+  uniform float uFloor;
   uniform float uNight;
 
   ${SKY_MAPPING_GLSL}
@@ -132,6 +133,10 @@ const CLOUD_FRAGMENT = /* glsl */ `
     // shape: broad flat base, rounded top, rather than a slab with a texture.
     float shaped = max(cover * mix(1.0, 0.52, hf * hf * uType), 0.004);
     float d = remap(base, 1.0 - shaped, 1.0, 0.0, 1.0);
+    // An overcast deck has no holes in it. Without a floor the noise leaves
+    // thin patches the sun burns straight through, and a rainy sky ends up
+    // looking like a sky that is clearing.
+    d = max(d, cover * uFloor * heightGradient(hf));
     if (d <= 0.0) return 0.0;
 
     if (!cheap) {
@@ -295,6 +300,8 @@ export interface CloudSettings {
   absorption: number;
   detail: number;
   cirrus: number;
+  /** Minimum density inside the deck; what makes an overcast sky solid. */
+  floor: number;
 }
 
 const scratchScissor = new Vector4();
@@ -343,6 +350,7 @@ export class CloudLayer {
     absorption: 1,
     detail: 0.32,
     cirrus: 0.25,
+    floor: 0,
   };
 
   constructor(quality: string) {
@@ -387,6 +395,7 @@ export class CloudLayer {
       uAbsorption: { value: 1 },
       uDetailStrength: { value: 0.32 },
       uCirrus: { value: 0.25 },
+      uFloor: { value: 0 },
       uNight: { value: 0 },
     };
 
@@ -474,6 +483,7 @@ export class CloudLayer {
     this.uniforms.uAbsorption.value = s.absorption;
     this.uniforms.uDetailStrength.value = s.detail;
     this.uniforms.uCirrus.value = s.cirrus;
+    this.uniforms.uFloor.value = s.floor;
   }
 
   /**
@@ -492,6 +502,7 @@ export class CloudLayer {
       s.density * 2 +
       s.absorption * 2 +
       s.cirrus * 3 +
+      s.floor * 4 +
       (this.uniforms.uKeyDir.value as Vector3).y * 3
     );
   }
