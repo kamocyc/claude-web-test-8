@@ -21,6 +21,13 @@ const outDir = process.argv[2] ?? 'shots';
 const wanted = (process.argv[3] ?? 'all').split(',').map((s) => s.trim());
 const baseUrl = process.argv[4] ?? 'http://127.0.0.1:4173/';
 const executablePath = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+// Rendering here is on a software rasteriser, so a smaller frame is the
+// difference between a usable iteration loop and a two-minute wait. SHOT_SCALE
+// also shortens the settle times, for a quick look while working.
+const shotW = +(process.env.SHOT_W ?? 1280);
+const shotH = +(process.env.SHOT_H ?? 720);
+const settle = +(process.env.SHOT_SETTLE ?? 1);
+const wait = (ms) => Math.max(600, Math.round(ms * settle));
 
 /**
  * A scenario pins everything that makes a frame reproducible: the seed and
@@ -64,7 +71,7 @@ const errors = [];
 const stats = {};
 
 for (const sc of scenarios) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  const page = await browser.newPage({ viewport: { width: shotW, height: shotH } });
   page.on('pageerror', (e) => errors.push(`[${sc.id}] ${e.message}`));
   page.on('console', (m) => {
     if (m.type() === 'error') errors.push(`[${sc.id}] console: ${m.text()}`);
@@ -72,9 +79,9 @@ for (const sc of scenarios) {
 
   const url = `${baseUrl}?capture=1&seed=${sc.seed}&time=${sc.time}`;
   await page.goto(url, { waitUntil: 'load' });
-  await page.waitForTimeout(9000);
+  await page.waitForTimeout(wait(9000));
   await page.evaluate(() => document.querySelector('.overlay .button')?.click());
-  await page.waitForTimeout(6000);
+  await page.waitForTimeout(wait(6000));
 
   // Run the train up to line speed under the ATO so the shot is of a service in
   // motion rather than a stationary train in a half-built world.
@@ -91,12 +98,12 @@ for (const sc of scenarios) {
       );
       if (here === sc.biome) break;
       await page.evaluate(() => window.game.skipToNextBiome());
-      await page.waitForTimeout(1200);
+      await page.waitForTimeout(wait(1200));
     }
     await page.evaluate(() => {
       window.game.auto.enabled = true;
     });
-    await page.waitForTimeout(11000);
+    await page.waitForTimeout(wait(11000));
   }
   if (sc.station) {
     // Park the shot just short of the next platform so the station itself is
@@ -110,7 +117,7 @@ for (const sc of scenarios) {
         g.journey.resetTo(g.train.position);
       }
     });
-    await page.waitForTimeout(9000);
+    await page.waitForTimeout(wait(9000));
   }
 
   await page.evaluate(
@@ -120,7 +127,7 @@ for (const sc of scenarios) {
     },
     [sc.cam, sc.weather],
   );
-  await page.waitForTimeout(9000);
+  await page.waitForTimeout(wait(9000));
 
   const shot = await page.evaluate(() => {
     const game = window.game;
