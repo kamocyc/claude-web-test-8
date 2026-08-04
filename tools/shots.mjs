@@ -72,7 +72,11 @@ const stats = {};
 
 const failed = [];
 
+const ATTEMPTS = +(process.env.SHOT_ATTEMPTS ?? 3);
+
 for (const sc of scenarios) {
+  let ok = false;
+  for (let attempt = 1; attempt <= ATTEMPTS && !ok; attempt++) {
   const page = await browser.newPage({ viewport: { width: shotW, height: shotH } });
   page.on('pageerror', (e) => errors.push(`[${sc.id}] ${e.message}`));
   page.on('console', (m) => {
@@ -174,6 +178,36 @@ for (const sc of scenarios) {
     // Prefer the composer: it carries tone mapping, bloom and the grade. On a
     // driver where the composer only ever returns black the watchdog has
     // already bypassed it, and a direct render is the honest fallback.
+    const gl = renderer.getContext();
+    // Judge the whole frame, not four pixels in the middle of it. A lost
+    // context or a driver that quietly fails a render target gives back an
+    // image that is black everywhere, and a centre probe on a night shot
+    // cannot tell that apart from a legitimately dark sky.
+    const survey = () => {
+      const w = canvas.width;
+      const h = canvas.height;
+      const step = 16;
+      const cols = Math.max(2, Math.floor(w / step));
+      const rows = Math.max(2, Math.floor(h / step));
+      const row = new Uint8Array(cols * 4);
+      let max = 0;
+      let sum = 0;
+      let n = 0;
+      let distinct = new Set();
+      for (let r = 0; r < rows; r++) {
+        const y = Math.min(h - 1, r * step);
+        gl.readPixels(0, y, cols, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
+        for (let i = 0; i < cols; i++) {
+          const lum = 0.2126 * row[i * 4] + 0.7152 * row[i * 4 + 1] + 0.0722 * row[i * 4 + 2];
+          if (lum > max) max = lum;
+          sum += lum;
+          n++;
+          if (distinct.size < 40) distinct.add(`${row[i * 4] >> 3},${row[i * 4 + 1] >> 3},${row[i * 4 + 2] >> 3}`);
+        }
+      }
+      return { max, mean: sum / Math.max(1, n), distinct: distinct.size };
+    };
+
     let used = 'composer';
     if (game.engine.postProcessing === 'off') {
       used = 'direct';
@@ -181,26 +215,20 @@ for (const sc of scenarios) {
       renderer.render(game.engine.scene, game.engine.camera);
     } else {
       game.engine.composer.render(1 / 60);
-      const gl = renderer.getContext();
-      const probe = new Uint8Array(4 * 4 * 4);
-      gl.readPixels(
-        Math.floor(canvas.width / 2) - 2,
-        Math.floor(canvas.height / 2) - 2,
-        4, 4, gl.RGBA, gl.UNSIGNED_BYTE, probe,
-      );
-      let sum = 0;
-      for (const v of probe) sum += v;
-      if (sum === 0) {
+      if (survey().max < 4) {
         used = 'direct-fallback';
         renderer.setRenderTarget(null);
         renderer.render(game.engine.scene, game.engine.camera);
       }
     }
+    const frame = survey();
     const png = canvas.toDataURL('image/png');
     game.engine.start();
     return {
       png,
       used,
+      frame,
+      contextLost: renderer.getContext().isContextLost(),
       fps: +game.engine.fps.toFixed(1),
       tris: cost.tris,
       calls: cost.calls,
@@ -209,16 +237,43 @@ for (const sc of scenarios) {
     };
   });
 
+  // A frame with no light anywhere in it, or one flat colour across the whole
+  // survey, is a dead render - a lost context or a failed target, not a dark
+  // night. Writing it would quietly poison every comparison made against this
+  // directory afterwards, so refuse it and let the caller retry.
+  const dead =
+    shot.contextLost || shot.frame.max < 4 || (shot.frame.distinct <= 2 && shot.frame.mean < 2);
+  if (dead) {
+    throw new Error(
+      `dead frame (max luma ${shot.frame.max.toFixed(1)}, mean ${shot.frame.mean.toFixed(1)}, ` +
+        `${shot.frame.distinct} distinct colours, contextLost=${shot.contextLost})`,
+    );
+  }
+
   writeFileSync(join(outDir, `${sc.id}.png`), Buffer.from(shot.png.split(',')[1], 'base64'));
-  stats[sc.id] = { path: sc.id, used: shot.used, fps: shot.fps, tris: shot.tris, calls: shot.calls, biome: shot.biome, speed: shot.speed };
-  console.log(`wrote ${sc.id}.png  via=${shot.used} fps=${shot.fps} tris=${shot.tris} calls=${shot.calls} biome=${shot.biome} v=${shot.speed}`);
+  stats[sc.id] = {
+    path: sc.id, used: shot.used, fps: shot.fps, tris: shot.tris, calls: shot.calls,
+    biome: shot.biome, speed: shot.speed,
+    maxLuma: +shot.frame.max.toFixed(1), meanLuma: +shot.frame.mean.toFixed(1),
+  };
+  console.log(
+    `wrote ${sc.id}.png  via=${shot.used} luma=${shot.frame.max.toFixed(0)}/${shot.frame.mean.toFixed(0)} ` +
+      `tris=${shot.tris} calls=${shot.calls} biome=${shot.biome} v=${shot.speed}`,
+  );
+  ok = true;
   } catch (e) {
-    // One scenario going wrong should cost us that scenario, not the fifteen
-    // that come after it.
-    failed.push(sc.id);
-    console.error(`FAILED ${sc.id}: ${e.message?.split('\n')[0] ?? e}`);
+    console.error(`  ${sc.id} attempt ${attempt}/${ATTEMPTS} failed: ${e.message?.split('\n')[0] ?? e}`);
   }
   await page.close();
+  if (ok) break;
+  }
+
+  // One scenario going wrong should cost us that scenario, not the fifteen
+  // that come after it - but it must be reported, never silently skipped.
+  if (!ok) {
+    failed.push(sc.id);
+    console.error(`FAILED ${sc.id} after ${ATTEMPTS} attempts`);
+  }
 }
 
 writeFileSync(join(outDir, 'stats.json'), JSON.stringify(stats, null, 2));
