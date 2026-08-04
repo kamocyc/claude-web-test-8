@@ -96,20 +96,48 @@ for (const sc of scenarios) {
   });
 
   if (sc.biome) {
-    // `B` runs the service on to the next change of landscape; hop along the
-    // line until the wanted country turns up, then let the world rebuild.
-    for (let i = 0; i < 20; i++) {
-      const here = await page.evaluate(
-        () => window.game.world.track.biomeAt(window.game.train.position),
-      );
-      if (here === sc.biome) break;
-      await page.evaluate(() => window.game.skipToNextBiome());
-      await page.waitForTimeout(wait(1200));
+    // Hopping landscape to landscape with `B` is a random walk over the biome
+    // transition chain, and some country simply never comes up inside a
+    // sensible number of hops - the city shot spent twenty of them in forest.
+    // The alignment can be read ahead of the train instead: extend the route
+    // and scan it for the country we actually want, then go straight there.
+    const found = await page.evaluate((target) => {
+      const track = window.game.world.track;
+      const start = window.game.train.position;
+      // Forest and mountain reinforce each other strongly and only leak into
+      // suburb (and thence city) at low weight, so the walk can stay in the
+      // hills for a very long way. Scan far enough that the rarer country is
+      // still reachable rather than silently shooting the wrong landscape.
+      for (let s = start + 600; s < start + 400_000; s += 250) {
+        track.extendTo(s + 1500);
+        if (track.biomeAt(s) === target) {
+          // Land a little way in so the shot is unmistakably that landscape
+          // rather than the tail of the cross-fade into it.
+          const at = s + 700;
+          track.extendTo(at + 2000);
+          return at;
+        }
+      }
+      return null;
+    }, sc.biome);
+
+    if (found === null) {
+      console.error(`  ${sc.id}: no ${sc.biome} within 160km of the start`);
+    } else {
+      await page.evaluate((at) => {
+        const g = window.game;
+        // Everything skipped counts as worked and the timetable moves with us,
+        // the same bargain the in-game skip makes.
+        for (const st of g.world.track.stations) if (st.s < at - 60) st.served = true;
+        g.world.track.shiftSchedule((at - g.train.position) / (70 / 3.6));
+        g.train.position = at;
+        g.train.speed = 0;
+        g.journey.resetTo(at);
+        g.auto.enabled = true;
+      }, found);
+      // The world streams in chunks, so give it time to build the new country.
+      await page.waitForTimeout(wait(14000));
     }
-    await page.evaluate(() => {
-      window.game.auto.enabled = true;
-    });
-    await page.waitForTimeout(wait(11000));
   }
   if (sc.station) {
     // Park the shot just short of the next platform so the station itself is
