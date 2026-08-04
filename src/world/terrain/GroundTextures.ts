@@ -118,8 +118,8 @@ const grassLayer: LayerFn = (x, y) => {
   const lush = smoothstep(0.34, 0.72, patch);
   const v = clamp01(0.30 + blade * 0.40 + clump * 0.24 + streak * 0.16 + fine * 0.06);
   // Two greens: a blue-green in the thick growth, a yellow-green on the tips.
-  const r = lerp(0.015, 0.066, v) * lerp(1.18, 0.82, lush);
-  const g = lerp(0.024, 0.112, v) * lerp(1.0, 1.08, lush);
+  const r = lerp(0.013, 0.058, v) * lerp(1.18, 0.82, lush);
+  const g = lerp(0.024, 0.118, v) * lerp(1.0, 1.08, lush);
   const b = lerp(0.008, 0.030, v) * lerp(1.18, 0.76, lush);
   const h = clamp01(blade * 0.55 + clump * 0.4 + streak * 0.25);
   return { r, g, b, h, rough: 0.88 + (1 - v) * 0.1, ao: clamp01(0.55 + h * 0.5) };

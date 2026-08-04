@@ -85,15 +85,19 @@ const groundChunk = /* glsl */ `
   float hollow = clamp(vCavity, 0.0, 1.0);
   float ridgeTop = clamp(-vCavity, 0.0, 1.0);
 
-  float dryness = clamp(vMacro.r * 1.45 + vMeso.r * 0.75 - 1.32
+  // Curvature is only known on the world tiles - the track-space corridor
+  // mesh beside the line does not carry it - so it is allowed to shade the
+  // ground but barely allowed to decide what the ground is made of. Otherwise
+  // the two meshes would part company along the edge of the corridor.
+  float dryness = clamp((vMacro.r * 1.45 + vMeso.r * 0.8 - 1.38
                         + smoothstep(180.0, 700.0, alt) * 0.3
-                        + ridgeTop * 0.28 - hollow * 0.45, 0.0, 1.0);
-  float wear = clamp(vMeso.g * 1.5 + vFine.g * 0.6 - 1.28
-                     + smoothstep(0.10, 0.36, slope) * 0.55, 0.0, 1.0);
+                        + ridgeTop * 0.12 - hollow * 0.18) * 1.7, 0.0, 1.0);
+  float wear = clamp((vMeso.g * 1.5 + vFine.g * 0.65 - 1.30
+                     + smoothstep(0.10, 0.36, slope) * 0.5) * 1.9, 0.0, 1.0);
   // Loose stone is the exception, not the rule: it wants ground steep enough
   // for nothing to hold on, or the hollow at the foot of ground like that.
   float stony = clamp(smoothstep(0.22, 0.52, slope) * 0.85
-                      + hollow * smoothstep(0.12, 0.34, slope) * 1.1
+                      + hollow * smoothstep(0.12, 0.34, slope) * 0.6
                       + (vMacro.a - 0.80) * 0.9, 0.0, 1.0);
   float shore = clamp(vShoreW, 0.0, 1.0);
 
@@ -126,7 +130,7 @@ const groundChunk = /* glsl */ `
 
   // Height blend: the layer whose own surface stands proudest wins the pixel,
   // so the boundary follows blades and stones instead of a soft contour.
-  float depth = 0.14;
+  float depth = 0.10;
   float top = max(a0.a + w0, a1.a + w1) - depth;
   float b0 = max(a0.a + w0 - top, 0.0);
   float b1 = max(a1.a + w1 - top, 0.0);
@@ -200,11 +204,11 @@ const groundChunk = /* glsl */ `
   // A second, much finer octave of the same normal map underfoot only. It
   // gives the lineside real surface texture and is gone long before the
   // distance where it would sparkle.
-  float near = uNearDetail * (1.0 - smoothstep(6.0, 34.0, viewDist));
+  float near = uNearDetail * (1.0 - smoothstep(9.0, 55.0, viewDist));
   if (near > 0.01) {
     vec2 uvN = uvD * 4.7;
     vec4 sn = textureGrad(uSurface, vec3(uvN, l0), dX * 4.7, dY * 4.7);
-    nrm += (sn.xy - 0.5) * 2.0 * near * 0.75;
+    nrm += (sn.xy - 0.5) * 2.0 * near * 0.95;
     albedo *= mix(1.0, 0.72 + textureGrad(uLayers, vec3(uvN, l0), dX * 4.7, dY * 4.7).g * 0.7, near * 0.45);
   }
 
@@ -218,7 +222,7 @@ const groundChunk = /* glsl */ `
   // --- occlusion ----------------------------------------------------------
   // Landform curvature darkens creases and valley floors; the layer's own
   // occlusion darkens between its blades and stones.
-  float landAO = 1.0 - clamp(hollow, 0.0, 1.0) * 0.38;
+  float landAO = 1.0 - clamp(hollow, 0.0, 1.0) * 0.34;
   gGroundAO = mix(1.0, gGroundAO, 0.5) * landAO;
   albedo *= gGroundAO;
 

@@ -47,17 +47,14 @@ const shoot = async (tag, prep) => {
   });
   fs.writeFileSync(`shots/dbg/${tag}.png`, Buffer.from(png.split(',')[1], 'base64'));
 };
-await shoot('all', () => {});
-await shoot('notiles', () => { window.game.world.tiles.group.visible = false; });
-await shoot('nochunks', () => {
-  const w = window.game.world;
-  w.tiles.group.visible = true;
-  w.group.children.find((c) => c.name === 'chunks').visible = false;
+await page.evaluate(() => {
+  const g = window.game;
+  g.auto.enabled = false;
+  g.train.speed = 0;
 });
-await shoot('nosea', () => {
-  const w = window.game.world;
-  w.group.children.find((c) => c.name === 'chunks').visible = true;
-  w.sea.mesh.visible = false;
+await page.waitForTimeout(70000);
+await shoot('settled', () => {
+  window.game.train.speed = 0;
 });
 const out = await page.evaluate(() => {
   const g = window.game;

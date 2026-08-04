@@ -37,7 +37,7 @@ const LEVELS: TileLevel[] = [
   // detail now, not the mesh.
   { size: 128, segments: 24, radius: 2 },
   { size: 256, segments: 24, radius: 3 },
-  { size: 512, segments: 24, radius: 3 },
+  { size: 512, segments: 24, radius: 2 },
   { size: 1024, segments: 20, radius: 2 },
   // Coarse enough and a distant ridge turns into a row of facets against the
   // sky, which is the first thing that gives a generated landscape away.
@@ -154,7 +154,11 @@ export class TerrainTiles {
 
   /** Builds queued tiles until the time budget for this frame is used up. */
   processQueue(budgetMs: number): number {
-    const deadline = performance.now() + budgetMs;
+    // A deep backlog means the world is being filled from nothing - the start
+    // of a run, or after the view jumped somewhere else entirely. A few long
+    // frames while that is closed are worth far less than holes in the ground,
+    // so the budget is raised until the queue is back to a trickle.
+    const deadline = performance.now() + (this.pending.length > 40 ? budgetMs * 2.5 : budgetMs);
     let built = 0;
     while (this.pending.length > 0 && performance.now() < deadline) {
       const job = this.pending.pop()!;
