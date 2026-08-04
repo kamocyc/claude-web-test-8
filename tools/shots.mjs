@@ -70,6 +70,8 @@ const browser = await chromium.launch({
 const errors = [];
 const stats = {};
 
+const failed = [];
+
 for (const sc of scenarios) {
   const page = await browser.newPage({ viewport: { width: shotW, height: shotH } });
   page.on('pageerror', (e) => errors.push(`[${sc.id}] ${e.message}`));
@@ -77,8 +79,12 @@ for (const sc of scenarios) {
     if (m.type() === 'error') errors.push(`[${sc.id}] console: ${m.text()}`);
   });
 
+  try {
   const url = `${baseUrl}?capture=1&seed=${sc.seed}&time=${sc.time}`;
-  await page.goto(url, { waitUntil: 'load' });
+  // Several of these runs happen while the box is busy compiling and rendering
+  // for somebody else, and a cold page load can take well over the default
+  // 30s. A slow machine is not a reason to throw away the whole matrix.
+  await page.goto(url, { waitUntil: 'load', timeout: 180_000 });
   await page.waitForTimeout(wait(9000));
   await page.evaluate(() => document.querySelector('.overlay .button')?.click());
   await page.waitForTimeout(wait(6000));
@@ -178,6 +184,12 @@ for (const sc of scenarios) {
   writeFileSync(join(outDir, `${sc.id}.png`), Buffer.from(shot.png.split(',')[1], 'base64'));
   stats[sc.id] = { path: sc.id, used: shot.used, fps: shot.fps, tris: shot.tris, calls: shot.calls, biome: shot.biome, speed: shot.speed };
   console.log(`wrote ${sc.id}.png  via=${shot.used} fps=${shot.fps} tris=${shot.tris} calls=${shot.calls} biome=${shot.biome} v=${shot.speed}`);
+  } catch (e) {
+    // One scenario going wrong should cost us that scenario, not the fifteen
+    // that come after it.
+    failed.push(sc.id);
+    console.error(`FAILED ${sc.id}: ${e.message?.split('\n')[0] ?? e}`);
+  }
   await page.close();
 }
 
@@ -187,4 +199,9 @@ if (errors.length) {
   for (const e of [...new Set(errors)].slice(0, 40)) console.error(e);
 }
 await browser.close();
-console.log(errors.length ? `DONE with ${errors.length} page errors` : 'DONE clean');
+if (failed.length) console.error(`missing scenarios: ${failed.join(',')}`);
+console.log(
+  `DONE ${Object.keys(stats).length}/${scenarios.length} captured` +
+    (errors.length ? `, ${errors.length} page errors` : ', no page errors'),
+);
+process.exit(failed.length ? 1 : 0);
