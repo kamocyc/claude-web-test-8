@@ -23,6 +23,8 @@ import {
   PlaneGeometry,
   Scene,
   Box3,
+  Euler,
+  Raycaster,
   SphereGeometry,
   SRGBColorSpace,
   Vector3,
@@ -30,7 +32,7 @@ import {
 } from 'three';
 import { Rng } from '../src/core/Random';
 import { QUALITY_PROFILES } from '../src/core/Settings';
-import { createCar } from '../src/train/TrainModel';
+import { createCab, createCar } from '../src/train/TrainModel';
 import { TrackPath, SAMPLE_STEP, type TrackSample } from '../src/world/TrackPath';
 import { TerrainField } from '../src/world/TerrainField';
 import { TerrainNoise } from '../src/world/Biome';
@@ -173,18 +175,28 @@ function focusOnBuilt(): void {
 
 let radius = 22;
 
-if (subject === 'car' || subject === 'cab-car') {
+/** Driver's eye, in stage space, for the first person view of the cab. */
+const eye = new Vector3(0, 2.4, 0);
+
+if (subject === 'car' || subject === 'cab-car' || subject === 'cab') {
   const car = createCar({
-    isCab: subject === 'cab-car',
+    isCab: subject !== 'car',
     bodyColor: 0xd6dbe0,
     accentColor: 0x1f6fb5,
-    hasPantograph: subject !== 'cab-car',
+    hasPantograph: subject === 'car',
     destination: '高原',
     length: 20,
   });
   car.group.position.y = 0.02;
   stage.add(car.group);
   radius = 26;
+  if (subject === 'cab') {
+    // The cab is only ever built by the consist, so the stage has to add it the
+    // same way: a child of the leading car, at the car's own origin.
+    const cab = createCab(20);
+    car.group.add(cab.group);
+    eye.copy(cab.eyePosition).add(car.group.position);
+  }
 } else if (subject === 'station' || subject === 'crossing' || subject === 'buildings') {
   const built = new Group();
   // Walk forward until the route offers the feature we want to look at. For a
@@ -232,6 +244,9 @@ if (subject === 'car' || subject === 'cab-car') {
 
 interface Stage {
   render(azimuth: number, elevation: number, distance: number, target: number[]): void;
+  renderEye(yaw: number, pitch: number, offset: number[]): void;
+  probe(yaw: number, pitch: number): string[];
+  overhang(limit: number): string[];
 }
 
 const target = new Vector3();
@@ -246,6 +261,53 @@ const target = new Vector3();
     );
     camera.lookAt(target);
     renderer.render(scene, camera);
+  },
+  /**
+   * The view the player actually spends the game looking at: from the driver's
+   * eye, down the car's own -Z, with the game's field of view. Judging a cab
+   * from outside it says nothing about how much of the line it lets you see.
+   */
+  renderEye(yaw: number, pitch: number, offset: number[]) {
+    camera.fov = 62;
+    camera.updateProjectionMatrix();
+    camera.position.set(eye.x + offset[0], eye.y + offset[1], eye.z + offset[2]);
+    camera.rotation.set(0, 0, 0);
+    camera.rotation.order = 'YXZ';
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
+    renderer.render(scene, camera);
+  },
+  /** What the driver's eye actually hits in a direction, nearest first. */
+  probe(yaw: number, pitch: number) {
+    const ray = new Raycaster();
+    const dir = new Vector3(0, 0, -1).applyEuler(new Euler(pitch, yaw, 0, 'YXZ'));
+    ray.set(eye, dir);
+    scene.updateMatrixWorld(true);
+    return ray
+      .intersectObjects([stage], true)
+      .slice(0, 5)
+      .map((h) => `${h.object.name || h.object.type} @ ${h.distance.toFixed(2)}`);
+  },
+  /** Anything reaching wider than `limit` from the centre line, worst first. */
+  overhang(limit: number) {
+    scene.updateMatrixWorld(true);
+    const worst = new Map<string, [number, number, number]>();
+    stage.traverse((obj) => {
+      const mesh = obj as Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      const pos = mesh.geometry.getAttribute('position');
+      const p = new Vector3();
+      for (let i = 0; i < pos.count; i++) {
+        p.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+        if (Math.abs(p.x) <= limit) continue;
+        const key = mesh.name || mesh.type;
+        const seen = worst.get(key);
+        if (!seen || Math.abs(p.x) > Math.abs(seen[0])) worst.set(key, [p.x, p.y, p.z]);
+      }
+    });
+    return [...worst.entries()]
+      .sort((a, b) => Math.abs(b[1][0]) - Math.abs(a[1][0]))
+      .map(([k, v]) => `${k}: x=${v[0].toFixed(3)} y=${v[1].toFixed(2)} z=${v[2].toFixed(2)}`);
   },
 };
 

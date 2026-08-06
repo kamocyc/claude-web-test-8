@@ -29,6 +29,8 @@ const VIEWS = {
     [0, 0.12, 0.8, 2.0, 0, 'rear'],
     [2.5, 0.62, 1.0, 2.0, 0, 'above'],
     [1.9, 0.03, 0.26, 0.9, 7.0, 'bogie'],
+    [2.2, 0.12, 0.30, 2.3, -8.2, 'cab-end'],
+    [1.55, 0.08, 0.26, 2.4, -8.6, 'cab-side'],
     [2.2, 0.3, 0.28, 3.6, 5.6, 'pantograph'],
   ],
   station: [
@@ -50,6 +52,17 @@ const VIEWS = {
   ],
 };
 
+/** yaw, pitch, label - first person views taken from the driver's eye. */
+const EYE_VIEWS = [
+  [0, 0, 'ahead'],
+  [0, -0.32, 'desk'],
+  [0.55, -0.05, 'left'],
+  [-0.55, -0.05, 'right'],
+  [1.4, -0.1, 'left-window'],
+  [-1.4, -0.1, 'right-window'],
+  [0, 0.3, 'up'],
+];
+
 const views = VIEWS[subject] ?? VIEWS.car;
 mkdirSync(outDir, { recursive: true });
 
@@ -66,6 +79,23 @@ page.on('console', (m) => {
 await page.goto(`${baseUrl}?subject=${subject}`, { waitUntil: 'load' });
 await page.waitForFunction(() => window.stageReady === true, null, { timeout: 60000 });
 await page.waitForTimeout(1500);
+
+if (subject === 'cab') {
+  for (const [yaw, pitch, label] of EYE_VIEWS) {
+    const dataUrl = await page.evaluate(
+      ([y, p]) => {
+        window.stage.renderEye(y, p, [0, 0, 0]);
+        return document.querySelector('canvas').toDataURL('image/png');
+      },
+      [yaw, pitch],
+    );
+    const file = join(outDir, `cab-${label}.png`);
+    writeFileSync(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
+    console.log('wrote', file);
+  }
+  await browser.close();
+  process.exit(0);
+}
 
 for (const [azimuth, elevation, scale, height, along, label] of views) {
   const dataUrl = await page.evaluate(

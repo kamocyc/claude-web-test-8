@@ -18,11 +18,16 @@ export class Input {
   /** Accumulated look delta in radians, consumed each frame by the camera. */
   lookYaw = 0;
   lookPitch = 0;
+  /** Accumulated sideways pan in metres, consumed each frame by the camera. */
+  panX = 0;
   /** Mouse wheel delta accumulated since the last frame. */
   wheel = 0;
 
   private dragging = false;
+  /** A drag with the right or middle button slides the view instead of turning it. */
+  private panning = false;
   private readonly sensitivity = 0.0022;
+  private readonly panSensitivity = 0.006;
 
   constructor(private readonly element: HTMLElement) {
     window.addEventListener('keydown', this.onKeyDown);
@@ -79,19 +84,26 @@ export class Input {
   private onBlur = (): void => {
     this.down.clear();
     this.dragging = false;
+    this.panning = false;
   };
 
   private onPointerDown = (e: PointerEvent): void => {
     if (e.target !== this.element) return;
-    this.dragging = true;
+    if (e.button === 2 || e.button === 1) this.panning = true;
+    else this.dragging = true;
     this.element.setPointerCapture?.(e.pointerId);
   };
 
   private onPointerUp = (): void => {
     this.dragging = false;
+    this.panning = false;
   };
 
   private onPointerMove = (e: PointerEvent): void => {
+    if (this.panning) {
+      this.panX -= e.movementX * this.panSensitivity;
+      return;
+    }
     const locked = document.pointerLockElement === this.element;
     if (!locked && !this.dragging) return;
     this.lookYaw -= e.movementX * this.sensitivity;
@@ -138,6 +150,7 @@ export class Input {
     this.released.clear();
     this.lookYaw = 0;
     this.lookPitch = 0;
+    this.panX = 0;
     this.wheel = 0;
   }
 }
