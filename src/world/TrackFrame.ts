@@ -87,6 +87,36 @@ export function trackMatrix(
   return out;
 }
 
+/**
+ * Transform for an object standing on the ground, at a world position.
+ *
+ * Anything whose height came from the terrain field has to be placed in a
+ * world-aligned frame, not the track frame: the track frame is rolled by the
+ * cant and tilted by the gradient, so an offset of a few hundred metres along
+ * its right axis lands tens of metres above or below the ground the height was
+ * read from. Houses, trees, fields and lineside furniture all stand upright on
+ * the terrain regardless of what the railway is doing, so they use this.
+ */
+export function groundMatrix(
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+  out = new Matrix4(),
+  scale?: Vector3,
+): Matrix4 {
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  right.set(c, 0, -s);
+  up.set(0, 1, 0);
+  back.set(s, 0, c);
+  out.makeBasis(right, up, back);
+  pos.set(x, y, z);
+  out.setPosition(pos);
+  if (scale) out.scale(scale);
+  return out;
+}
+
 /** Orientation-only quaternion for the track frame. */
 export function trackQuaternion(sample: TrackSample, out = new Quaternion()): Quaternion {
   trackAxes(sample, right, up, fwd);

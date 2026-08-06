@@ -93,8 +93,17 @@ export class ShadowFitter {
     // Normal-offset scaled to the texel: enough to clear self-shadowing on a
     // rail head at a grazing sun angle without lifting a tree's shadow off the
     // grass.
-    shadow.normalBias = Math.max(0.02, texel * 1.35);
-    shadow.bias = -0.00012 - texel * 0.00035;
+    //
+    // How much is enough depends entirely on how low the sun is. The depth the
+    // map stores changes across one texel by the texel size divided by the
+    // tangent of the sun's elevation, so at first light that is ten times what
+    // it is at noon and a bias that holds up in the middle of the day leaves
+    // open ground shadowing itself into near black at either end of it. Both
+    // terms therefore scale with the elevation; at a low sun the shadows are
+    // long and soft enough that the contact they give up is not missed.
+    const grazing = Math.max(0.16, Math.abs(this.lightDir.y));
+    shadow.normalBias = Math.max(0.02, texel * 1.35) / grazing;
+    shadow.bias = -(0.00012 + texel * 0.00035) / grazing;
     // r185's PCF filter is a Vogel disk scaled by this radius, so it is the
     // one honest knob for how soft an edge is.
     shadow.radius = softness;

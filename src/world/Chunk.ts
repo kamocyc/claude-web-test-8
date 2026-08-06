@@ -3,6 +3,7 @@ import { Rng } from '../core/Random';
 import type { QualityProfile } from '../core/Settings';
 import type { WaterRegistry } from '../materials/WaterMaterial';
 import { CHUNK_LENGTH, type ChunkContext, type DynamicCrossing, type DynamicSignal } from './ChunkContext';
+import { Occupancy } from './Sites';
 import type { TerrainField } from './TerrainField';
 import { SAMPLE_STEP, type TrackPath, type TrackSample } from './TrackPath';
 import {
@@ -73,6 +74,7 @@ export class Chunk {
       signals: this.signals,
       crossings: this.crossings,
       detailed,
+      sites: new Occupancy(),
     };
 
     buildFormation(ctx);
@@ -87,9 +89,13 @@ export class Chunk {
     buildSigns(ctx);
     buildCrossings(ctx);
     buildWaterways(ctx);
-    buildFields(ctx);
+    // Order matters: each of these books the ground it stands on, and the ones
+    // after it keep off. Roads first because everything else fronts onto them,
+    // then the buildings, then the fields around the buildings, then whatever
+    // will grow in what is left.
     buildRoads(ctx);
     buildBuildings(ctx);
+    buildFields(ctx);
     buildVegetation(ctx);
     buildGroundCover(ctx);
     buildLinesideDetail(ctx);

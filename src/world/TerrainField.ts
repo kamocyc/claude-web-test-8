@@ -1,5 +1,6 @@
 import { BIOME_IDS, BIOME_INDEX, SEA_LEVEL, TerrainNoise, blendedElevation, blendedAttr } from './Biome';
 import { clamp, clamp01, lerp, smoothstep } from '../core/MathUtils';
+import { riverAxis, riverGround, sampleRiver } from './River';
 import { SAMPLE_STEP, STRUCT_BRIDGE, STRUCT_TUNNEL, TrackPath, type TrackSample } from './TrackPath';
 
 /** Top of the formation (bottom of the ballast) relative to the rail head. */
@@ -22,6 +23,26 @@ export const TUNNEL_COVER = 10;
 /** Distance over which the hill a tunnel is bored through rises, metres. */
 const RIDGE_RAMP = 170;
 
+/**
+ * Water level of the lineside drainage canal.
+ *
+ * A level surface, not a constant depth below the ground: a canal that follows
+ * every ripple in the field it drains is a canal running uphill.
+ */
+export function canalLevel(sample: TrackSample): number {
+  return sample.y - 1.4;
+}
+
+/** Lateral offset of the lineside canal from the centre line. */
+export function canalCentre(sample: TrackSample, noise: TerrainNoise): number {
+  return sample.riverSide * (46 + noise.hills.sample(sample.s * 0.0015, 3.1) * 26);
+}
+
+/** Width of the lineside canal at a chainage. */
+export function canalWidth(sample: TrackSample, noise: TerrainNoise): number {
+  return 9 + noise.detail.sample(sample.s * 0.004, 7.7) * 5;
+}
+
 export interface ProjectionResult {
   /** Chainage of the nearest point on the centre line. */
   s: number;
@@ -29,7 +50,20 @@ export interface ProjectionResult {
   lateral: number;
   /** Index of the nearest stored sample, reusable as the next search hint. */
   hint: number;
+  /**
+   * How far the point lies beyond the end of the generated route, metres.
+   *
+   * Track space only exists where there is track. Past the last sample every
+   * point in the world projects onto that one sample, so anything expressed in
+   * chainage - the earthworks, a tunnel ridge, a lineside canal - would be
+   * smeared across the entire horizon. This says how much to believe the
+   * projection, and everything in track space fades out with it.
+   */
+  beyond: number;
 }
+
+/** Distance past the end of the route over which track space stops applying. */
+const TRACK_SPACE_FADE = 220;
 
 /**
  * The ground.
@@ -61,6 +95,7 @@ export class TerrainField {
     riverStrength: 0,
     structure: 0,
     stationZone: 0,
+    beyond: 0,
   };
 
   constructor(
@@ -149,11 +184,24 @@ export class TerrainField {
     const fz = Math.sin(sm.heading);
     const along = dx * fx + dz * fz;
     const lateral = dx * -Math.sin(sm.heading) + dz * Math.cos(sm.heading);
-    const result = out ?? { s: 0, lateral: 0, hint: 0 };
+    const result = out ?? { s: 0, lateral: 0, hint: 0, beyond: 0 };
     result.s = sm.s + clamp(along, -SAMPLE_STEP * 2, SAMPLE_STEP * 2);
     result.lateral = lateral;
     result.hint = best;
+    // Only the two end samples can be a projection that ran out of route; in
+    // the middle the nearest sample is genuinely the nearest point on the line.
+    result.beyond =
+      best === 0 ? Math.max(0, -along) : best === count - 1 ? Math.max(0, along) : 0;
     return result;
+  }
+
+  /**
+   * How much of the track-space shaping applies at a projection: 1 beside the
+   * line, falling to 0 past the ends of the generated route.
+   */
+  private validity(sample: TrackSample): number {
+    const beyond = sample.beyond ?? 0;
+    return beyond > 0 ? 1 - smoothstep(0, TRACK_SPACE_FADE, beyond) : 1;
   }
 
   /** Interpolated track sample, reusing an internal scratch object. */
@@ -220,11 +268,11 @@ export class TerrainField {
     const sea = coastal * (band * 1.2 + (above < 0 ? 0.85 : 0));
 
     // The bank of a lineside canal or drain silts up in the same way.
-    const canal = clamp01(sample.riverStrength);
+    const canal = clamp01(sample.riverStrength * this.validity(sample));
     let bank = 0;
     if (canal > 0.02) {
-      const centre = sample.riverSide * (46 + this.noise.hills.sample(sample.s * 0.0015, 3.1) * 26);
-      const width = 9 + this.noise.detail.sample(sample.s * 0.004, 7.7) * 5;
+      const centre = canalCentre(sample, this.noise);
+      const width = canalWidth(sample, this.noise);
       bank = canal * (1 - smoothstep(width * 0.6, width * 2.0, Math.abs(lateral - centre)));
     }
     return clamp01(Math.max(sea, bank * 0.8));
@@ -241,14 +289,21 @@ export class TerrainField {
    */
   private raiseTunnelRidge(h: number, sample: TrackSample, lateral: number, x: number, z: number): number {
     const s = sample.s;
+    const ax = Math.abs(lateral);
+    // The ridge is the hillside the bore is driven through, so it belongs to
+    // the line: it is worthless past the end of the route, and beyond a few
+    // hundred metres either side it would be lifting the whole horizon.
+    const reach = this.validity(sample) * (1 - smoothstep(420, 900, ax));
+    if (reach <= 0.002) return h;
     let out = h;
     for (const tunnel of this.track.tunnels) {
       if (s < tunnel.sStart - RIDGE_RAMP || s > tunnel.sEnd + RIDGE_RAMP) continue;
-      const ramp = Math.min(
-        smoothstep(tunnel.sStart - RIDGE_RAMP, tunnel.sStart, s),
-        smoothstep(tunnel.sEnd + RIDGE_RAMP, tunnel.sEnd, s),
-      );
-      const ax = Math.abs(lateral);
+      const ramp =
+        reach *
+        Math.min(
+          smoothstep(tunnel.sStart - RIDGE_RAMP, tunnel.sStart, s),
+          smoothstep(tunnel.sEnd + RIDGE_RAMP, tunnel.sEnd, s),
+        );
       // The crest clears the bore over the line and climbs away from it, so the
       // tunnel reads as a spur of the hillside rather than a lump on the map.
       const relief =
@@ -279,59 +334,41 @@ export class TerrainField {
     return Math.max(this.natural(sample, lateral, x, z), sample.y + TUNNEL_COVER);
   }
 
-  /** Cuts river channels and lineside canals into the natural surface. */
+  /** Cuts river valleys and lineside canals into the natural surface. */
   private carveRivers(h: number, sample: TrackSample, lateral: number, x: number, z: number): number {
-    const s = sample.s;
-
-    // Rivers the line crosses on a bridge.
-    //
-    // A Japanese river of any size is not a canal: it is a wide gravel bed
-    // between raised levees, dry over most of its width, with the low flow
-    // threading through it in one or two braided channels. Cutting it as a
-    // flat trough is what turns a river crossing into a lake, so the bed is
-    // built from bars and channels instead.
+    // Rivers the line crosses on a bridge. These are world-space features:
+    // where the bed lies has nothing to do with where the railway happens to
+    // be, which is exactly why they used to run off into the distance as a
+    // flat pan the moment the route ran out.
     for (const river of this.track.rivers) {
-      const ds = s - river.s;
-      if (Math.abs(ds) > river.width * 2.2 + 220) continue;
-      // The river runs across the alignment at an angle.
-      const dist = Math.abs(ds - lateral * Math.tan(river.skew)) * Math.cos(river.skew);
-      const half = river.width * 0.5;
-      if (dist > half + 120) continue;
-
-      // The water surface the bridge and the water mesh are both built to.
-      const waterY = sample.y - river.bankHeight - 3.0;
-      // Gravel bars: shingle standing just clear of the water, with the coarse
-      // undulation that shingle always has.
-      const bars = this.noise.detail.fbm(x * 0.011, z * 0.011, 2) * 1.6;
-      const barY = waterY + 1.1 + bars;
-
-      // Two low channels that wander across the bed rather than running
-      // straight, so the water threads instead of pooling.
-      const wander = this.noise.hills.fbm(x * 0.0032, z * 0.0032, 2) * half * 0.5;
-      const main = 1 - smoothstep(river.width * 0.055, river.width * 0.2, Math.abs(dist - (half * 0.28 + wander)));
-      const side = 1 - smoothstep(river.width * 0.04, river.width * 0.15, Math.abs(dist - (half * 0.74 - wander * 0.7)));
-      const channel = Math.max(main, side * 0.75);
-      const bed = barY - channel * (2.4 + river.bankHeight * 0.14);
-
-      const bank = smoothstep(half * 0.92, half + 60, dist);
-      h = lerp(bed, h, bank);
-
-      // The levee: an embankment carrying a maintenance road along each side,
-      // held off the alignment so it never fouls the formation.
-      const crest = Math.exp(-Math.pow((dist - (half + 34)) / 26, 2));
-      h += crest * river.bankHeight * 0.4 * smoothstep(34, 95, Math.abs(lateral));
+      const axis = riverAxis(this.track, river);
+      const r = sampleRiver(axis, x, z, this.noise);
+      if (!r) continue;
+      let influence = r.strength;
+      // The line crosses its river on a bridge and nowhere else. If the
+      // alignment curls back over the same channel further along, the
+      // formation wins and the water goes through a culvert under it.
+      if (sample.structure !== STRUCT_BRIDGE) {
+        influence *= smoothstep(12, 44, Math.abs(lateral));
+      }
+      h = riverGround(h, r, x, z, axis, this.noise, influence);
     }
 
-    // A drainage canal running beside the line through flat country.
-    const canal = sample.riverStrength;
+    // A drainage canal running beside the line through flat country. This one
+    // really is a feature of the railway - it is the line's own drain - so it
+    // stays in track space, and dies with it.
+    const canal = sample.riverStrength * this.validity(sample);
     if (canal > 0.02) {
-      const centre = sample.riverSide * (46 + this.noise.hills.sample(s * 0.0015, 3.1) * 26);
-      const width = 9 + this.noise.detail.sample(s * 0.004, 7.7) * 5;
+      const centre = canalCentre(sample, this.noise);
+      const width = canalWidth(sample, this.noise);
       const dist = Math.abs(lateral - centre);
       if (dist < width * 3) {
-        const depth = 2.6 * canal;
-        const t = smoothstep(width * 0.5, width * 1.5, dist);
-        h = lerp(h - depth, h, t);
+        // Cut to a level bed rather than a constant depth below the ground, or
+        // the water surface laid on top of it inherits every ripple in the
+        // field it crosses.
+        const bed = canalLevel(sample) - 1.5;
+        const t = smoothstep(width * 0.5, width * 1.6, dist);
+        h = lerp(Math.min(h, bed), h, t);
       }
     }
     return h;
@@ -344,6 +381,11 @@ export class TerrainField {
   ground(sample: TrackSample, lateral: number, x: number, z: number, forTiles = false): number {
     const nat = this.natural(sample, lateral, x, z);
     const ax = Math.abs(lateral);
+    // No route here, no earthworks: past the end of what has been generated the
+    // ground is simply the country, or the formation would be extruded across
+    // the whole horizon from the last sample of track.
+    const built = this.validity(sample);
+    if (built <= 0.002) return nat;
     // Coarse LOD tiles cannot resolve the earthworks, so they are sunk very
     // slightly near the line where the fine corridor mesh covers them. The
     // ramp reaches zero before the corridor edge, so nothing is left exposed.
@@ -384,13 +426,20 @@ export class TerrainField {
       const flat = sample.stationZone * (1 - smoothstep(24, 70, ax));
       h = lerp(h, formationY - 0.9, flat * 0.85);
     }
-    return h + tileBias;
+    return lerp(nat, h, built) + tileBias;
+  }
+
+  /** Interpolated track sample for a projection, carrying its validity. */
+  sampleFor(projection: ProjectionResult): TrackSample {
+    const sample = this.track.sampleAt(projection.s, this.scratch);
+    sample.beyond = projection.beyond;
+    return sample;
   }
 
   /** Ground level at an arbitrary world position. */
   heightAt(x: number, z: number, hint = -1): { y: number; projection: ProjectionResult } {
     const projection = this.project(x, z, hint);
-    const sample = this.sampleAt(projection.s);
+    const sample = this.sampleFor(projection);
     return { y: this.ground(sample, projection.lateral, x, z), projection };
   }
 

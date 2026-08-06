@@ -19,7 +19,7 @@ import {
   asphaltMaterial,
 } from './Prefabs';
 import { getBallastMaterial, getRailMaterial, getSleeperMaterial, createTerrainMaterial } from '../materials/Materials';
-import { blendedGrassColor, SEA_LEVEL } from '../world/Biome';
+import { blendedGrassColor } from '../world/Biome';
 import { trackMatrix, trackPoint } from '../world/TrackFrame';
 import { STRUCT_BRIDGE, STRUCT_TUNNEL, TRACK_SPACING, TRACK_GAUGE } from '../world/TrackPath';
 import type { ChunkContext } from '../world/ChunkContext';
@@ -65,6 +65,7 @@ export function buildFormation(ctx: ChunkContext): void {
   const colors = new Float32Array(count * 3);
   const slopes = new Float32Array(count);
   const shores = new Float32Array(count);
+  const cavities = new Float32Array(count);
   const heights = new Float32Array(count);
 
   const p = new Vector3();
@@ -88,7 +89,9 @@ export function buildFormation(ctx: ChunkContext): void {
       uvs[idx * 2] = x * 0.06;
       uvs[idx * 2 + 1] = z * 0.06;
       const col = blendedGrassColor(sample.weights);
-      const tint = 0.78 + field.noise.patches.fbm(x * 0.0016, z * 0.0016, 3) * 0.5;
+      // Exactly the wash the world tiles use, or the corridor reads as a
+      // differently coloured strip laid along the line.
+      const tint = 0.88 + field.noise.patches.fbm(x * 0.0016, z * 0.0016, 2) * 0.28;
       colors[idx * 3] = col.r * tint;
       colors[idx * 3 + 1] = col.g * tint;
       colors[idx * 3 + 2] = col.b * tint;
@@ -96,13 +99,12 @@ export function buildFormation(ctx: ChunkContext): void {
       // metres beyond the shoulder, which is what the eye expects beside a
       // running line. The sand sheet doubles as that gravel.
       const cess = 0.6 * (1 - smoothstep(5.4, 11, Math.abs(lateral)));
-      shores[idx] = clamp01(
-        Math.max(
-          cess,
-          (1 - smoothstep(0.4, 3.4, y - SEA_LEVEL)) * smoothstep(-2.5, 0.4, y - SEA_LEVEL) * 1.15 +
-            (y < SEA_LEVEL ? 0.85 : 0),
-        ),
-      );
+      // Everything beyond the cess is decided by the same shore function the
+      // world tiles use. It had its own rule here - anything within a few
+      // metres of sea level is beach - and low-lying farmland is within a few
+      // metres of sea level, so the corridor laid a two-hundred-metre strip of
+      // sand down the middle of country the tiles were drawing as grass.
+      shores[idx] = clamp01(Math.max(cess, field.shoreFactor(sample, lateral, y)));
       worldPositions.push(p.clone().set(x, y, z));
     }
   }
@@ -126,6 +128,16 @@ export function buildFormation(ctx: ChunkContext): void {
       normals[idx * 3 + 1] = n.y;
       normals[idx * 3 + 2] = n.z;
       slopes[idx] = clamp01(1 - n.y);
+
+      // Curvature, as the discrete Laplacian of the height field, exactly as
+      // the world tiles compute it. The ground shader reads this to darken
+      // hollows and gather loose stone in them; the corridor did not supply it
+      // at all, so the strip beside the line was shading itself from whatever
+      // an unbound vertex attribute happened to contain - which is why it read
+      // as a two-hundred-metre band of bare soil laid over the fields.
+      const spacing = Math.max(4, rightP.distanceTo(left) * 0.5);
+      const lap = (left.y + rightP.y + down.y + upP.y) * 0.25 - worldPositions[idx].y;
+      cavities[idx] = Math.max(-1, Math.min(1, lap / (spacing * 0.22)));
     }
   }
 
@@ -147,6 +159,7 @@ export function buildFormation(ctx: ChunkContext): void {
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
   geometry.setAttribute('aSlope', new BufferAttribute(slopes, 1));
   geometry.setAttribute('aShore', new BufferAttribute(shores, 1));
+  geometry.setAttribute('aCavity', new BufferAttribute(cavities, 1));
   geometry.setIndex(indices);
   geometry.computeBoundingSphere();
 

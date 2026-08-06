@@ -67,7 +67,7 @@ export class World {
     this.group.add(this.sea.mesh);
 
     // Generate enough route for the opening view before the first frame.
-    this.track.extendTo((profile.chunksAhead + 3) * CHUNK_LENGTH);
+    this.track.extendTo(this.routeAhead(0));
     this.field.rebuildIndex();
   }
 
@@ -83,11 +83,16 @@ export class World {
     const ahead = this.profile.chunksAhead;
     const behind = this.profile.chunksBehind;
 
-    this.track.extendTo(playerS + (ahead + 2) * CHUNK_LENGTH);
-    this.track.prune(playerS - (behind + 2) * CHUNK_LENGTH);
+    this.track.extendTo(this.routeAhead(playerS));
+    this.track.prune(playerS - Math.max((behind + 2) * CHUNK_LENGTH, 1800));
     this.field.rebuildIndex();
 
-    const first = Math.floor((playerS - behind * CHUNK_LENGTH) / CHUNK_LENGTH);
+    // There is no route before chainage zero. A chunk asked to cover it gets
+    // the first sample back for every chainage it queries, and builds itself a
+    // corridor whose rows are all the same row: zero-area triangles, normals
+    // that normalise to nothing, and a smear of grey ground behind the train
+    // for the first few hundred metres of every run.
+    const first = Math.max(0, Math.floor((playerS - behind * CHUNK_LENGTH) / CHUNK_LENGTH));
     const last = Math.floor((playerS + ahead * CHUNK_LENGTH) / CHUNK_LENGTH);
 
     for (const [index, chunk] of this.chunks) {
@@ -125,6 +130,21 @@ export class World {
 
     this.sea.setVisible(this.coastNearby());
     if (this.sea.mesh.visible) this.sea.update(cameraPos.x, cameraPos.z);
+  }
+
+  /**
+   * Chainage the route has to reach.
+   *
+   * Far enough for the chunks is not far enough for the ground: terrain is
+   * drawn to the fog limit and every height it asks for is answered in track
+   * space, so route that stops short of the horizon leaves the whole distance
+   * projected onto the last sleeper - one chainage, one biome, one elevation,
+   * smeared across everything the driver can see. The alignment is cheap to
+   * integrate; the horizon is not something to economise on.
+   */
+  private routeAhead(playerS: number): number {
+    const chunks = (this.profile.chunksAhead + 2) * CHUNK_LENGTH;
+    return playerS + Math.max(chunks, this.profile.viewDistance + 600);
   }
 
   /** True when any part of the route in view runs along the sea. */

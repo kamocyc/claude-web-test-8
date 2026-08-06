@@ -108,7 +108,39 @@ something laid on top of it.
 Terrain is drawn as concentric rings of tiles (`TerrainTiles.ts`), 4 m grid
 close in and coarsening by powers of two out to the fog limit, with a downward
 skirt hiding the LOD seams — plus a fine track-space strip that resolves the
-earthworks the tiles cannot.
+earthworks the tiles cannot. Each ring is punched hollow where the ring inside
+it already covers the ground, overlapping it by exactly one of its own cells:
+two meshes of different resolution do not agree between their vertices, so a
+solid ring shows through the one inside it as flat facets and z-fighting.
+
+Track space, though, only exists where there is track. Every query carries how
+far it fell past the end of the generated route, and everything the railway did
+to the ground — the formation, a station forecourt, the lineside drain, the
+hillside a tunnel is bored through — fades out with it, so the horizon is never
+shaped by whatever happened to be at the last sleeper. The route itself is
+integrated out to the fog limit rather than to the last chunk, which is much
+cheaper than it sounds and is what gives the distance real biomes to be.
+
+**Rivers** (`River.ts`) are the one part of the landscape that is not the
+railway's, so they are not described in the railway's coordinates. A crossing
+is resolved once into a world-space axis — a point, a downstream direction, a
+surface level and a fall — and the valley, the braided gravel bed and the water
+drawn on it are all functions of world position after that. The bed is combined
+with the natural ground by taking the lower of the two, never by replacing it,
+so a river cuts a gorge through the mountains and a shallow trench across a
+plain and can never raise a wall of its own across a hillside.
+
+**Anything standing on the ground** — a house, a tree, a rice field, a fence —
+is placed in a world-aligned frame at the height the terrain actually reports,
+never in the track frame. The track frame is rolled by the cant and tilted by
+the gradient; an offset of a couple of hundred metres along its right axis
+lands tens of metres above or below the ground, which is enough to hang a whole
+neighbourhood in the air over a canted curve. Buildings read the ground at the
+four corners of their own footprint, refuse a plot too steep to build on, stand
+on the high corner and carry the fall on a concrete stem wall. Land is claimed
+before it is built on (`Sites.ts`), and the road, the water and the fields are
+functions every builder asks before it places anything — which is what keeps
+houses out of the carriageway and out of the river.
 
 **Tunnels** are the one thing a height field cannot express: ground that arches
 over the line. So it does not try. The hillside a tunnel is driven through
@@ -186,7 +218,7 @@ src/
   game/       game loop, journey and scoring, cameras
   ui/         cab display, dials, menus
   audio/      synthesised sound
-tools/        headless screenshot capture and smoke test
+tools/        headless screenshot capture, smoke test and landscape audits
 ```
 
 ## Notes
@@ -194,3 +226,11 @@ tools/        headless screenshot capture and smoke test
 Quality auto-detects and can be changed on the title screen; the renderer also
 scales its drawing buffer to hold frame rate without popping scene detail.
 Requires WebGL 2.
+
+`tools/groundcheck.mjs` audits the landscape rather than a picture of it: it
+takes the world position of everything a chunk built, asks the terrain how high
+the ground is there, and reports the distribution of the error. A tree fifteen
+metres in the air is only obvious from the right angle, so this is the check
+that does not depend on catching it in a screenshot.
+`tools/rivershot.mjs` photographs the first river crossing on a route, which is
+where the terrain, the bridge and the water surface all have to agree at once.

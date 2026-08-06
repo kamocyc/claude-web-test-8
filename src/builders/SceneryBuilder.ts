@@ -25,7 +25,10 @@ import {
   unitCylinder,
 } from './Prefabs';
 import { blendedAttr, BIOME_INDEX, dominantBiome } from '../world/Biome';
-import { trackMatrix } from '../world/TrackFrame';
+import { groundMatrix } from '../world/TrackFrame';
+import { canalLevel, canalCentre, canalWidth } from '../world/TerrainField';
+import { riverAxis, riverHalfAt, riverLevelAt, riverPoint } from '../world/River';
+import { onRoad, roadAt, waterProximity } from '../world/Sites';
 import { createWaterMaterial } from '../materials/WaterMaterial';
 import { textures } from '../materials/TextureFactory';
 import { clamp01, lerp } from '../core/MathUtils';
@@ -36,9 +39,13 @@ import type { TrackSample } from '../world/TrackPath';
  * Everything that lives beside the line: forests, fields, houses, towns,
  * roads, canals and the small clutter that makes a lineside look inhabited.
  *
- * Scatter is done in track space (chainage plus lateral offset) which keeps
- * density constant along the route and makes it trivial to keep the four-foot
- * clear, then projected onto the terrain field so nothing floats.
+ * Candidate positions are chosen in track space (chainage plus lateral offset)
+ * which keeps density constant along the route and makes it trivial to keep the
+ * four-foot clear. Everything is then *placed* in world space, standing on the
+ * terrain: the track frame is rolled by the cant and tilted by the gradient, so
+ * an offset of a couple of hundred metres along its right axis lands tens of
+ * metres off the ground the height was read from - which is what used to leave
+ * whole neighbourhoods hanging in the air over a canted curve.
  */
 
 interface Placement {
@@ -47,9 +54,14 @@ interface Placement {
   x: number;
   y: number;
   z: number;
+  /** Index hint into the stored samples, for further height queries nearby. */
+  hint: number;
 }
 
 const scratchVec = new Vector3();
+
+/** Beyond this the world tiles draw the ground, not the track-space corridor. */
+const CORRIDOR_REACH = 70;
 
 function place(ctx: ChunkContext, s: number, lateral: number): Placement | null {
   const sample = ctx.track.sampleAt(s);
@@ -57,9 +69,59 @@ function place(ctx: ChunkContext, s: number, lateral: number): Placement | null 
   const rz = Math.cos(sample.heading);
   const x = sample.x + rx * lateral;
   const z = sample.z + rz * lateral;
-  const y = ctx.field.ground(sample, lateral, x, z);
+  const hint = ctx.track.sampleIndex(s);
+  // Ask for the height the way whichever mesh draws the ground here asks for
+  // it. Beside the line that is the corridor, in track space at this chainage;
+  // further out it is the tiles, which project the world position back onto
+  // the centre line - and on a tight curve those two are not the same place at
+  // all. Reading the wrong one is what left a stand of trees hanging twenty
+  // metres over the inside of a mountain bend.
+  const y =
+    Math.abs(lateral) < CORRIDOR_REACH
+      ? ctx.field.ground(sample, lateral, x, z)
+      : ctx.field.heightAt(x, z, hint).y;
   if (!Number.isFinite(y)) return null;
-  return { sample, lateral, x, y, z };
+  return { sample, lateral, x, y, z, hint };
+}
+
+/** Ground under a rectangular footprint: the extremes of its four corners. */
+function footprint(
+  ctx: ChunkContext,
+  p: Placement,
+  halfW: number,
+  halfD: number,
+  yaw: number,
+): { low: number; high: number } {
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  let low = p.y;
+  let high = p.y;
+  for (const [ox, oz] of [
+    [-halfW, -halfD],
+    [halfW, -halfD],
+    [halfW, halfD],
+    [-halfW, halfD],
+  ]) {
+    // Local X is right, local Z is back, matching `groundMatrix`.
+    const wx = p.x + c * ox + s * oz;
+    const wz = p.z - s * ox + c * oz;
+    const { y } = ctx.field.heightAt(wx, wz, p.hint);
+    if (y < low) low = y;
+    if (y > high) high = y;
+  }
+  return { low, high };
+}
+
+/**
+ * World yaw that squares an object to the line.
+ *
+ * `groundMatrix` puts local +X to the right and local +Z back along the object,
+ * the same convention `trackMatrix` uses, so this is the angle at which the two
+ * frames agree - lineside furniture that has to line up with the railway
+ * without inheriting its cant.
+ */
+function alignedYaw(heading: number): number {
+  return -(heading + Math.PI / 2);
 }
 
 /** Lateral offset with more samples further out, mirrored to both sides. */
@@ -90,6 +152,9 @@ export function buildVegetation(ctx: ChunkContext): void {
     if (p.y < 0.8) continue; // in the water
     if (p.sample.structure !== 0 && Math.abs(lateral) < 30) continue;
     if (p.sample.stationZone > 0.35 && Math.abs(lateral) < 55) continue;
+    if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 2.5)) continue;
+    if (waterProximity(ctx.field, p.sample, lateral, p.x, p.z, 6) > 0.4) continue;
+    if (!ctx.sites.free(p.x, p.z, 2.5)) continue;
 
     const density = blendedAttr(p.sample.weights, 'treeDensity');
     // Woodland grows in stands with open ground between them, not as an even
@@ -106,18 +171,19 @@ export function buildVegetation(ctx: ChunkContext): void {
     const height = conifer ? ctx.rng.range(9, 21) : ctx.rng.range(5.5, 13);
     const trunkRadius = height * ctx.rng.range(0.016, 0.028);
     const lean = ctx.rng.range(-0.05, 0.05);
+    const yaw = ctx.rng.range(0, 6.28);
 
     scale.set(trunkRadius * 2, height * (conifer ? 0.42 : 0.55), trunkRadius * 2);
-    trackMatrix(p.sample, lateral, p.y - p.sample.y, matrix, ctx.rng.range(0, 6.28), scale);
+    groundMatrix(p.x, p.y - 0.25, p.z, yaw, matrix, scale);
     matrix.multiply(new Matrix4().makeRotationZ(lean));
     color.setRGB(0.55, 0.45, 0.36).multiplyScalar(ctx.rng.range(0.8, 1.2));
     trunks.push(matrix, color);
 
     const crownHeight = conifer ? height : height * 0.62;
     const crownWidth = conifer ? height * 0.42 : height * ctx.rng.range(0.65, 0.95);
-    const baseY = p.y - p.sample.y + (conifer ? height * 0.16 : height * 0.42);
+    const baseY = p.y + (conifer ? height * 0.16 : height * 0.42);
     scale.set(crownWidth, crownHeight, crownWidth);
-    trackMatrix(p.sample, lateral, baseY, matrix, ctx.rng.range(0, 6.28), scale);
+    groundMatrix(p.x, baseY, p.z, yaw, matrix, scale);
 
     const seasonal = ctx.field.noise.patches.fbm(p.x * 0.0008, p.z * 0.0008, 2);
     const variant = ctx.rng.int(0, TREE_VARIANTS - 1);
@@ -142,12 +208,14 @@ export function buildVegetation(ctx: ChunkContext): void {
     if (!p || p.y < 0.8) continue;
     if (p.sample.structure !== 0 && Math.abs(lateral) < 30) continue;
     if (p.sample.stationZone > 0.35 && Math.abs(lateral) < 55) continue;
+    if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 1.5)) continue;
+    if (!ctx.sites.free(p.x, p.z, 1.5)) continue;
     const patch = clamp01(ctx.field.noise.scatter.fbm(p.x * 0.0035, p.z * 0.0035, 3) * 0.5 + 0.5);
     const shrubs = blendedAttr(p.sample.weights, 'shrubDensity');
     if (!ctx.rng.chance(clamp01(shrubs * (0.2 + patch * 0.9)) * 0.7)) continue;
     const size = ctx.rng.range(1.1, 2.9);
     scale.set(size * ctx.rng.range(0.9, 1.4), size * 0.8, size * ctx.rng.range(0.9, 1.4));
-    trackMatrix(p.sample, lateral, p.y - p.sample.y, matrix, ctx.rng.range(0, 6.28), scale);
+    groundMatrix(p.x, p.y - 0.15, p.z, ctx.rng.range(0, 6.28), matrix, scale);
     color.setRGB(0.24, 0.36, 0.17).multiplyScalar(ctx.rng.range(0.7, 1.3));
     broadleaves[ctx.rng.int(0, TREE_VARIANTS - 1)].push(matrix, color);
   }
@@ -187,6 +255,8 @@ export function buildGroundCover(ctx: ChunkContext): void {
     const p = place(ctx, s, lateral);
     if (!p || p.y < 0.4) continue;
     if (p.sample.structure !== 0) continue;
+    if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 0.5)) continue;
+    if (!ctx.sites.free(p.x, p.z, 0.6)) continue;
     const shrub = blendedAttr(p.sample.weights, 'shrubDensity');
     // Weeds grow thickest right at the edge of the ballast, where nothing
     // walks on them and the drainage is good.
@@ -196,7 +266,7 @@ export function buildGroundCover(ctx: ChunkContext): void {
     // cardboard cut-outs standing in the grass.
     const size = ctx.rng.range(0.3, 0.95);
     scale.set(size * 1.7, size * ctx.rng.range(0.8, 1.4), size * 1.7);
-    trackMatrix(p.sample, lateral, p.y - p.sample.y, matrix, ctx.rng.range(0, 6.28), scale);
+    groundMatrix(p.x, p.y - 0.05, p.z, ctx.rng.range(0, 6.28), matrix, scale);
     const shade = ctx.rng.range(0.6, 1.3);
     // The odd bleached, seeded head among the green.
     const dry = ctx.rng.chance(0.16) ? 1 : 0;
@@ -213,6 +283,16 @@ export function buildGroundCover(ctx: ChunkContext): void {
 }
 
 type BuildingKind = 'house' | 'farmhouse' | 'shophouse' | 'block' | 'tower' | 'warehouse';
+
+/** Plan dimensions and how much fall a plot of each kind will tolerate. */
+const KIND_SITE: Record<BuildingKind, { plot: number; fall: number }> = {
+  house: { plot: 2.6, fall: 2.4 },
+  farmhouse: { plot: 3.4, fall: 2.4 },
+  shophouse: { plot: 1.6, fall: 2.0 },
+  block: { plot: 3.0, fall: 2.6 },
+  tower: { plot: 5.0, fall: 2.6 },
+  warehouse: { plot: 3.0, fall: 1.8 },
+};
 
 /** Towns, villages and industrial estates. */
 export function buildBuildings(ctx: ChunkContext): void {
@@ -238,7 +318,10 @@ export function buildBuildings(ctx: ChunkContext): void {
 
   const attempts = Math.round(60 * ctx.profile.sceneryDensity);
   for (let i = 0; i < attempts; i++) {
-    const s = ctx.rng.range(ctx.sStart, ctx.sEnd);
+    // Keep the whole plot inside this chunk's stretch of line: chunks are built
+    // independently and cannot see each other's claims, so a building that
+    // overhangs the join is a building that can be built over.
+    const s = ctx.rng.range(ctx.sStart + 24, ctx.sEnd - 24);
     const lateral = scatterLateral(ctx, 22, 300);
     const p = place(ctx, s, lateral);
     if (!p || p.y < 1.2) continue;
@@ -248,48 +331,73 @@ export function buildBuildings(ctx: ChunkContext): void {
     const cluster = ctx.field.noise.scatter.fbm(p.x * 0.0022 + 40, p.z * 0.0022, 3) * 0.5 + 0.5;
     if (!ctx.rng.chance(clamp01(density * (0.25 + cluster * 1.15)) * 0.8)) continue;
 
+    // Nothing is built in the carriageway, in the river or on the flood side of
+    // its levee.
+    if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 3)) continue;
+    if (waterProximity(ctx.field, p.sample, lateral, p.x, p.z, 22) > 0.25) continue;
+
     const biomeId = dominantBiome(p.sample.weights);
-    const primary = blendedAttr(p.sample.weights, 'buildingDensity');
-    const kind = pickBuildingKind(ctx, biomeId, primary, cluster);
+    const kind = pickBuildingKind(ctx, biomeId, density, cluster);
+    const plan = planBuilding(ctx, kind);
+    const site = KIND_SITE[kind];
 
     const yaw = gridAngle + (ctx.rng.chance(0.5) ? 0 : Math.PI / 2) + ctx.rng.range(-0.06, 0.06);
-    const baseY = p.y - p.sample.y - 0.25;
+    const radius = Math.hypot(plan.w, plan.d) * 0.5 + site.plot;
+    if (!ctx.sites.free(p.x, p.z, radius)) continue;
+
+    // Ground is not level, and a box dropped on the average of it floats at one
+    // corner and is buried at the other. Read the plot, refuse anything too
+    // steep to build on, stand the building on the high corner and carry the
+    // fall on a concrete stem wall - which is how a Japanese house sits on a
+    // slope anyway.
+    const { low, high } = footprint(ctx, p, plan.w * 0.5, plan.d * 0.5, yaw);
+    if (high - low > site.fall) continue;
+    ctx.sites.claim(p.x, p.z, radius);
+
+    const baseY = high + 0.1;
+    const plinth = baseY - (low - 0.6);
+    scale.set(plan.w + 0.55, plinth, plan.d + 0.55);
+    groundMatrix(p.x, low - 0.6, p.z, yaw, matrix, scale);
+    collector('concrete').push(matrix, new Color(0.63, 0.62, 0.59));
+
+    const put = (w: number, h: number, d: number, y: number, key: string, c: Color): Matrix4 => {
+      scale.set(w, h, d);
+      groundMatrix(p.x, baseY + y, p.z, yaw, matrix, scale);
+      collector(key).push(matrix, c);
+      return matrix;
+    };
 
     switch (kind) {
       case 'house': {
-        const w = ctx.rng.range(6, 9.5);
-        const d = ctx.rng.range(6.5, 11);
-        const h = ctx.rng.chance(0.45) ? ctx.rng.range(5.4, 6.8) : ctx.rng.range(2.9, 3.4);
-        scale.set(w, h, d);
-        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        const { w, d, h } = plan;
         color.setHSL(ctx.rng.range(0.06, 0.15), ctx.rng.range(0.03, 0.16), ctx.rng.range(0.62, 0.88));
-        collector('siding').push(matrix, color);
+        put(w, h, d, 0, 'siding', color);
         scale.set(w + 0.9, ctx.rng.range(1.5, 2.4), d + 0.9);
-        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
+        groundMatrix(p.x, baseY + h, p.z, yaw, matrix, scale);
         color.setHSL(ctx.rng.range(0.55, 0.65), ctx.rng.range(0.06, 0.3), ctx.rng.range(0.2, 0.42));
         roofs.push(matrix, color);
         // Entrance canopy, a balcony on the upper floor, and the block wall
         // that surrounds every Japanese plot.
         scale.set(w * 0.42, 0.16, 1.5);
-        trackMatrix(p.sample, lateral, baseY + 2.25, matrix, yaw, scale);
+        groundMatrix(p.x, baseY + 2.25, p.z, yaw, matrix, scale);
         matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.6) / 1.5));
         collector('concrete').push(matrix, new Color(0.62, 0.6, 0.57));
         if (h > 4.5) {
           scale.set(w * 0.8, 1.05, 0.12);
-          trackMatrix(p.sample, lateral, baseY + h * 0.52, matrix, yaw, scale);
+          groundMatrix(p.x, baseY + h * 0.52, p.z, yaw, matrix, scale);
           matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.06) / 0.12));
           collector('concrete').push(matrix, new Color(0.78, 0.77, 0.74));
         }
         if (ctx.rng.chance(0.7)) {
           const wallColor = new Color(0.7, 0.69, 0.65);
-          const hw = w * 0.5 + 2.2;
-          const hd = d * 0.5 + 2.2;
+          const hw = w * 0.5 + 2.0;
+          const hd = d * 0.5 + 2.0;
           for (const [ox, oz, sx, sz] of [
             [-hw, 0, 0.22, hd * 2], [hw, 0, 0.22, hd * 2],
             [0, -hd, hw * 2, 0.22], [0, hd, hw * 2, 0.22],
           ] as [number, number, number, number][]) {
             scale.set(sx, 1.5, sz);
-            trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+            groundMatrix(p.x, low - 0.2, p.z, yaw, matrix, scale);
             matrix.multiply(new Matrix4().makeTranslation(ox / sx, 0, oz / sz));
             collector('concrete').push(matrix, wallColor);
           }
@@ -297,94 +405,60 @@ export function buildBuildings(ctx: ChunkContext): void {
         break;
       }
       case 'farmhouse': {
-        const w = ctx.rng.range(9, 14);
-        const d = ctx.rng.range(7, 11);
-        const h = ctx.rng.range(3.0, 4.0);
-        scale.set(w, h, d);
-        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        const { w, d, h } = plan;
         color.setHSL(0.09, 0.07, ctx.rng.range(0.68, 0.9));
-        collector('siding').push(matrix, color);
+        put(w, h, d, 0, 'siding', color);
         scale.set(w + 1.8, ctx.rng.range(2.6, 3.8), d + 1.8);
-        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
+        groundMatrix(p.x, baseY + h, p.z, yaw, matrix, scale);
         color.setHSL(0.03, 0.12, ctx.rng.range(0.16, 0.3));
         hipRoofs.push(matrix, color);
         break;
       }
       case 'shophouse': {
-        const w = ctx.rng.range(6, 10);
-        const d = ctx.rng.range(9, 14);
-        const h = ctx.rng.range(7, 11);
-        scale.set(w, h, d);
-        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        const { w, d, h } = plan;
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.8, 1.05));
-        collector(`facade${ctx.rng.int(0, 4)}`).push(matrix, color);
+        put(w, h, d, 0, `facade${ctx.rng.int(0, 4)}`, color);
         // Shop front: an awning over the pavement and a signboard standing up
         // the corner of the building.
-        scale.set(w + 0.5, 0.3, 1.6);
-        trackMatrix(p.sample, lateral, baseY + 3.1, matrix, yaw, scale);
-        collector('metal').push(matrix, new Color(0.5, 0.2, 0.18));
+        put(w + 0.5, 0.3, 1.6, 3.1, 'metal', new Color(0.5, 0.2, 0.18));
         scale.set(0.9, h * 0.55, 0.35);
-        trackMatrix(p.sample, lateral, baseY + h * 0.36, matrix, yaw, scale);
+        groundMatrix(p.x, baseY + h * 0.36, p.z, yaw, matrix, scale);
         matrix.multiply(new Matrix4().makeTranslation((w * 0.5 - 0.6) / 0.9, 0, (d * 0.5 + 0.2) / 0.35));
         signs.push(matrix, new Color().setHSL(ctx.rng.next(), 0.62, 0.52));
         break;
       }
       case 'block': {
-        const w = ctx.rng.range(12, 22);
-        const d = ctx.rng.range(12, 22);
-        const h = ctx.rng.range(11, 28);
-        scale.set(w, h, d);
-        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        const { w, d, h } = plan;
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.78, 1.06));
-        collector(`facade${ctx.rng.int(0, 4)}`).push(matrix, color);
+        put(w, h, d, 0, `facade${ctx.rng.int(0, 4)}`, color);
         // Roof-top plant behind a parapet, and a water tank on legs.
-        scale.set(w * 0.3, 1.8, d * 0.3);
-        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
-        collector('concrete').push(matrix, new Color(0.72, 0.72, 0.7));
-        scale.set(w + 0.4, 0.9, d + 0.4);
-        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
-        collector('concrete').push(matrix, new Color(0.76, 0.75, 0.72));
+        put(w * 0.3, 1.8, d * 0.3, h, 'concrete', new Color(0.72, 0.72, 0.7));
+        put(w + 0.4, 0.9, d + 0.4, h, 'concrete', new Color(0.76, 0.75, 0.72));
         if (ctx.rng.chance(0.5)) {
           scale.set(2.6, 1.5, 2.0);
-          trackMatrix(p.sample, lateral, baseY + h + 1.9, matrix, yaw, scale);
+          groundMatrix(p.x, baseY + h + 1.9, p.z, yaw, matrix, scale);
           matrix.multiply(new Matrix4().makeTranslation((w * 0.26) / 2.6, 0, (d * 0.26) / 2.0));
           collector('metal').push(matrix, new Color(0.78, 0.78, 0.76));
         }
         break;
       }
       case 'tower': {
-        const w = ctx.rng.range(14, 22);
-        const d = ctx.rng.range(14, 22);
-        const h = ctx.rng.range(30, 68);
-        scale.set(w, h, d);
-        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        const { w, d, h } = plan;
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.8, 1.04));
-        collector(`facade${ctx.rng.int(0, 4)}`).push(matrix, color);
-        scale.set(w * 0.55, 3.2, d * 0.55);
-        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
-        collector('concrete').push(matrix, new Color(0.66, 0.66, 0.65));
-        scale.set(w + 0.5, 1.1, d + 0.5);
-        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
-        collector('concrete').push(matrix, new Color(0.7, 0.7, 0.69));
-        scale.set(0.24, 6.5, 0.24);
-        trackMatrix(p.sample, lateral, baseY + h + 3.2, matrix, yaw, scale);
-        collector('metal').push(matrix, new Color(0.8, 0.5, 0.45));
+        put(w, h, d, 0, `facade${ctx.rng.int(0, 4)}`, color);
+        put(w * 0.55, 3.2, d * 0.55, h, 'concrete', new Color(0.66, 0.66, 0.65));
+        put(w + 0.5, 1.1, d + 0.5, h, 'concrete', new Color(0.7, 0.7, 0.69));
+        put(0.24, 6.5, 0.24, h + 3.2, 'metal', new Color(0.8, 0.5, 0.45));
         break;
       }
       case 'warehouse': {
-        const w = ctx.rng.range(14, 28);
-        const d = ctx.rng.range(11, 20);
-        const h = ctx.rng.range(6, 9.5);
-        scale.set(w, h, d);
-        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        const { w, d, h } = plan;
         color.setRGB(0.72, 0.75, 0.78).multiplyScalar(ctx.rng.range(0.85, 1.15));
-        collector('metal').push(matrix, color);
-        scale.set(w + 0.7, 0.5, d + 0.7);
-        trackMatrix(p.sample, lateral, baseY + h, matrix, yaw, scale);
-        collector('metal').push(matrix, color.clone().multiplyScalar(0.85));
+        put(w, h, d, 0, 'metal', color);
+        put(w + 0.7, 0.5, d + 0.7, h, 'metal', color.clone().multiplyScalar(0.85));
         // Roller shutter across the gable end.
         scale.set(w * 0.34, h * 0.62, 0.25);
-        trackMatrix(p.sample, lateral, baseY, matrix, yaw, scale);
+        groundMatrix(p.x, baseY, p.z, yaw, matrix, scale);
         matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.1) / 0.25));
         collector('metal').push(matrix, new Color(0.55, 0.56, 0.58));
         break;
@@ -423,6 +497,31 @@ export function buildBuildings(ctx: ChunkContext): void {
   if (signMesh) ctx.group.add(signMesh);
 }
 
+/**
+ * Plan size of a building, drawn before the plot is tested so the ground can be
+ * read at the footprint the building will actually have.
+ */
+function planBuilding(ctx: ChunkContext, kind: BuildingKind): { w: number; d: number; h: number } {
+  switch (kind) {
+    case 'house':
+      return {
+        w: ctx.rng.range(6, 9.5),
+        d: ctx.rng.range(6.5, 11),
+        h: ctx.rng.chance(0.45) ? ctx.rng.range(5.4, 6.8) : ctx.rng.range(2.9, 3.4),
+      };
+    case 'farmhouse':
+      return { w: ctx.rng.range(9, 14), d: ctx.rng.range(7, 11), h: ctx.rng.range(3.0, 4.0) };
+    case 'shophouse':
+      return { w: ctx.rng.range(6, 10), d: ctx.rng.range(9, 14), h: ctx.rng.range(7, 11) };
+    case 'block':
+      return { w: ctx.rng.range(12, 22), d: ctx.rng.range(12, 22), h: ctx.rng.range(11, 28) };
+    case 'tower':
+      return { w: ctx.rng.range(14, 22), d: ctx.rng.range(14, 22), h: ctx.rng.range(30, 68) };
+    default:
+      return { w: ctx.rng.range(14, 28), d: ctx.rng.range(11, 20), h: ctx.rng.range(6, 9.5) };
+  }
+}
+
 function pickBuildingKind(
   ctx: ChunkContext,
   biomeId: string,
@@ -448,26 +547,59 @@ function pickBuildingKind(
   }
 }
 
-/** A road running alongside the line, and the poles that follow it. */
+/**
+ * A road running alongside the line, and the poles that follow it.
+ *
+ * The alignment of the road is a pure function of chainage (see `roadAt`), so
+ * it is continuous from chunk to chunk; it is laid in runs that break wherever
+ * the road has no business being - across a river with no bridge, over a
+ * structure, through a station forecourt - rather than being pushed through.
+ */
 export function buildRoads(ctx: ChunkContext): void {
-  const first = ctx.samples[0];
-  const roadDensity = blendedAttr(first.weights, 'roadDensity');
-  if (roadDensity < 0.42) return;
-
-  const side = ctx.field.noise.patches.sample(ctx.sStart * 0.0004, 88.2) > 0 ? 1 : -1;
+  const noise = ctx.field.noise;
   const builder = new MeshBuilder();
-  const rows: Vector3[][] = [];
-  const uvV: number[] = [];
-  const centreLat = side * (26 + ctx.field.noise.hills.sample(ctx.sStart * 0.001, 4.4) * 9);
-  const halfWidth = roadDensity > 1.2 ? 6 : 3.6;
+  const poles = new InstanceCollector();
+  const wires = new MeshBuilder();
+  const matrix = new Matrix4();
+  const scale = new Vector3();
+  const poleColor = new Color(0.62, 0.6, 0.56);
+  const surface = new Color(0.62, 0.62, 0.63);
+
+  let rows: Vector3[][] = [];
+  let uvV: number[] = [];
+  const flush = () => {
+    if (rows.length > 2) builder.addSweep(rows, surface, uvV, [0, 0.05, 0.95, 1]);
+    rows = [];
+    uvV = [];
+  };
+
+  let previousPole: Vector3 | null = null;
+  let nextPoleS = Math.ceil(ctx.sStart / 38) * 38;
 
   for (let i = 0; i < ctx.samples.length; i += 2) {
     const sample = ctx.samples[i];
+    const road = roadAt(sample, noise);
+    if (!road.present) {
+      flush();
+      previousPole = null;
+      continue;
+    }
+
+    const rx = -Math.sin(sample.heading);
+    const rz = Math.cos(sample.heading);
+    const cx = sample.x + rx * road.centre;
+    const cz = sample.z + rz * road.centre;
+    // A road has to get over the water like anything else, and it has no
+    // bridge - so it stops at the bank and starts again on the other side.
+    if (waterProximity(ctx.field, sample, road.centre, cx, cz, road.half + 8) > 0.15) {
+      flush();
+      previousPole = null;
+      continue;
+    }
+
     const row: Vector3[] = [];
-    for (const off of [-halfWidth, -halfWidth * 0.92, halfWidth * 0.92, halfWidth]) {
-      const lat = centreLat + off;
-      const rx = -Math.sin(sample.heading);
-      const rz = Math.cos(sample.heading);
+    for (const off of [-road.half, -road.half * 0.92, road.half * 0.92, road.half]) {
+      const lat = road.centre + off;
       const x = sample.x + rx * lat;
       const z = sample.z + rz * lat;
       const y = ctx.field.ground(sample, lat, x, z) + 0.08;
@@ -475,44 +607,40 @@ export function buildRoads(ctx: ChunkContext): void {
     }
     rows.push(row);
     uvV.push(sample.s * 0.09);
+    // The carriageway is somebody's ground: nothing else gets to stand on it.
+    ctx.sites.claim(cx, cz, road.half + 1.5);
+
+    if (sample.s >= nextPoleS) {
+      // Step past whatever the last break in the road skipped, or the first
+      // pole after a gap is followed by a row of them every few metres.
+      while (nextPoleS <= sample.s) nextPoleS += 38;
+      const poleLat = road.centre + road.side * (road.half + 1.6);
+      const px = sample.x + rx * poleLat;
+      const pz = sample.z + rz * poleLat;
+      const py = ctx.field.ground(sample, poleLat, px, pz);
+      scale.set(0.28, 9.5, 0.28);
+      groundMatrix(px, py, pz, 0, matrix, scale);
+      poles.push(matrix, poleColor);
+      scale.set(1.8, 0.12, 0.12);
+      groundMatrix(px, py + 8.6, pz, 0, matrix, scale);
+      wires.add(unitBox(), matrix, poleColor);
+
+      const top = new Vector3(px, py + 9.0, pz);
+      if (previousPole) {
+        const mid = previousPole.clone().add(top).multiplyScalar(0.5);
+        mid.y -= 0.55;
+        addWire(wires, previousPole, mid, top, new Color(0.12, 0.12, 0.12));
+      }
+      previousPole = top;
+    }
   }
-  if (rows.length < 2) return;
-  builder.addSweep(rows, new Color(0.62, 0.62, 0.63), uvV, [0, 0.05, 0.95, 1]);
+  flush();
 
   const mesh = builder.toMesh(asphaltMaterial(), true, 'road');
   if (mesh) {
     mesh.receiveShadow = true;
     ctx.group.add(mesh);
   }
-
-  // Utility poles and their wires.
-  const poles = new InstanceCollector();
-  const wires = new MeshBuilder();
-  const matrix = new Matrix4();
-  const scale = new Vector3();
-  const poleColor = new Color(0.62, 0.6, 0.56);
-  const spacing = 38;
-  const poleLat = centreLat + side * (halfWidth + 1.6);
-  let previous: Vector3 | null = null;
-  for (let s = Math.ceil(ctx.sStart / spacing) * spacing; s <= ctx.sEnd; s += spacing) {
-    const p = place(ctx, s, poleLat);
-    if (!p) continue;
-    scale.set(0.28, 9.5, 0.28);
-    trackMatrix(p.sample, poleLat, p.y - p.sample.y, matrix, 0, scale);
-    poles.push(matrix, poleColor);
-    scale.set(1.8, 0.12, 0.12);
-    trackMatrix(p.sample, poleLat, p.y - p.sample.y + 8.6, matrix, 0, scale);
-    wires.add(unitBox(), matrix, poleColor);
-
-    const top = new Vector3(p.x, p.y + 9.0, p.z);
-    if (previous) {
-      const mid = previous.clone().add(top).multiplyScalar(0.5);
-      mid.y -= 0.55;
-      addWire(wires, previous, mid, top, new Color(0.12, 0.12, 0.12));
-    }
-    previous = top;
-  }
-
   const poleMesh = makeInstanced(unitCylinder(6), concreteMaterial(), poles, {
     castShadow: true,
     name: 'poles',
@@ -574,7 +702,7 @@ export function buildFields(ctx: ChunkContext): void {
 
   for (let sIdx = 0; ; sIdx++) {
     const s0 = ctx.sStart + sIdx * fieldLength;
-    if (s0 >= ctx.sEnd) break;
+    if (s0 + fieldLength >= ctx.sEnd) break;
     for (let side = -1; side <= 1; side += 2) {
       for (let lane = 0; lane < 9; lane++) {
         const lat = side * (24 + lane * fieldWidth);
@@ -583,32 +711,45 @@ export function buildFields(ctx: ChunkContext): void {
         if (!p) continue;
         if (p.y < 1.0) continue;
         if (p.sample.structure !== 0) continue;
+        if (onRoad(roadAt(p.sample, ctx.field.noise), lat, 2)) continue;
+        if (waterProximity(ctx.field, p.sample, lat, p.x, p.z, 14) > 0.15) continue;
         const weight = blendedAttr(p.sample.weights, 'paddy');
         if (!ctx.rng.chance(clamp01(weight * 1.05))) continue;
-        // Slope check: paddies only occupy flat ground.
-        const pa = place(ctx, s0, lat - fieldWidth * 0.5);
-        const pb = place(ctx, s0 + fieldLength, lat + fieldWidth * 0.5);
-        if (!pa || !pb) continue;
-        if (Math.abs(pa.y - pb.y) > 1.6) continue;
+        // Small enough that two fields on neighbouring lanes do not exclude
+        // each other, large enough to keep a house out of the crop.
+        const radius = 7.5;
+        if (!ctx.sites.free(p.x, p.z, radius)) continue;
+        const yaw = alignedYaw(p.sample.heading);
 
-        const level = (p.y + pa.y + pb.y) / 3;
+        // A paddy is a level pan held by a bund, and a bund is ankle high. Cut
+        // one only where the ground is already close to level: on anything
+        // steeper the pan has to stand proud at one end, and a rice field on a
+        // plinth is a swimming pool.
+        const { low, high } = footprint(ctx, p, fieldWidth * 0.5, fieldLength * 0.5, yaw);
+        if (high - low > 0.5) continue;
+        ctx.sites.claim(p.x, p.z, radius);
+
+        const level = high - 0.06;
         const isFlooded = ctx.rng.chance(clamp01(0.55 - season * 0.5) + 0.2);
         const target = isFlooded ? flooded : planted;
 
-        scale.set(fieldWidth - 1.2, 0.06, fieldLength - 1.2);
-        trackMatrix(p.sample, lat, level - p.sample.y + (isFlooded ? 0.16 : 0.1), matrix, 0, scale);
+        // The pan reaches down below the lowest corner, so no matter which way
+        // the ground falls the water meets earth rather than air.
+        const pan = level - (low - 0.5);
+        scale.set(fieldWidth - 1.0, pan, fieldLength - 1.0);
+        groundMatrix(p.x, low - 0.5, p.z, yaw, matrix, scale);
         target.add(unitBox(), matrix, white);
 
-        // Levees around the field.
+        // Bunds around the field: earth walked on by the farmer, not concrete.
         for (const [dl, ds, w, d] of [
-          [-(fieldWidth - 1) * 0.5, 0, 0.6, fieldLength],
-          [(fieldWidth - 1) * 0.5, 0, 0.6, fieldLength],
-          [0, -(fieldLength - 1) * 0.5, fieldWidth, 0.6],
-          [0, (fieldLength - 1) * 0.5, fieldWidth, 0.6],
+          [-(fieldWidth - 0.6) * 0.5, 0, 0.55, fieldLength],
+          [(fieldWidth - 0.6) * 0.5, 0, 0.55, fieldLength],
+          [0, -(fieldLength - 0.6) * 0.5, fieldWidth, 0.55],
+          [0, (fieldLength - 0.6) * 0.5, fieldWidth, 0.55],
         ] as [number, number, number, number][]) {
-          const sm = ctx.track.sampleAt(centreS + ds);
-          scale.set(w, 0.34, d);
-          trackMatrix(sm, lat + dl, level - sm.y - 0.02, matrix, 0, scale);
+          scale.set(w, level - low + 0.26, d);
+          groundMatrix(p.x, low - 0.02, p.z, yaw, matrix, scale);
+          matrix.multiply(new Matrix4().makeTranslation(dl / w, 0, ds / d));
           levees.add(unitBox(), matrix, leveeColor);
         }
       }
@@ -648,37 +789,43 @@ export function buildFields(ctx: ChunkContext): void {
   }
 }
 
-/** River crossings and lineside canals, as water surfaces on carved ground. */
+/**
+ * River crossings and lineside canals, as water surfaces on carved ground.
+ *
+ * The river surface is generated from the same world-space axis the terrain
+ * carved its valley from, so the water is on the bed by construction rather
+ * than by both of them happening to agree. It runs the length of the modelled
+ * river - a couple of kilometres either side of the line - narrowing towards
+ * each end, so it goes somewhere instead of stopping in mid air.
+ */
 export function buildWaterways(ctx: ChunkContext): void {
   const builder = new MeshBuilder();
   const depths: number[] = [];
+  const point = { x: 0, z: 0 };
 
   for (const river of ctx.track.rivers) {
     if (river.s < ctx.sStart || river.s >= ctx.sEnd) continue;
-    const half = river.width * 0.5;
+    const axis = riverAxis(ctx.track, river);
     const rows: Vector3[][] = [];
     const uvV: number[] = [];
-    const level = ctx.track.sampleAt(river.s).y - river.bankHeight - 3.0;
-    for (let lat = -420; lat <= 420; lat += 30) {
-      const s = river.s + lat * Math.tan(river.skew);
-      const sample = ctx.track.sampleAt(s);
+    const step = Math.max(24, axis.reach / 90);
+    for (let t = -axis.reach; t <= axis.reach + 0.01; t += step) {
+      const level = riverLevelAt(axis, t);
+      const half = riverHalfAt(axis, t);
       const row: Vector3[] = [];
-      // Column order runs against the direction of travel so the surface
-      // faces up.
-      for (const ds of [half, half * 0.55, 0, -half * 0.55, -half]) {
-        const sm = ctx.track.sampleAt(s + ds);
-        const rx = -Math.sin(sm.heading);
-        const rz = Math.cos(sm.heading);
-        const x = sm.x + rx * lat;
-        const z = sm.z + rz * lat;
-        row.push(new Vector3(x, level, z));
-        depths.push(Math.max(0.05, level - ctx.field.ground(sm, lat, x, z)));
+      // Column order runs from the right bank to the left so the surface faces
+      // up. The shingle bars stand out of it; that is what braiding looks like.
+      for (const u of [half, half * 0.6, half * 0.25, 0, -half * 0.25, -half * 0.6, -half]) {
+        riverPoint(axis, t, u, ctx.field.noise, point);
+        row.push(new Vector3(point.x, level, point.z));
+        depths.push(Math.max(0.05, level - ctx.field.heightAt(point.x, point.z).y));
       }
-      void sample;
       rows.push(row);
-      uvV.push(lat * 0.02);
+      uvV.push(t * 0.02);
     }
-    builder.addSweep(rows, new Color(1, 1, 1), uvV, [0, 0.25, 0.5, 0.75, 1]);
+    if (rows.length > 1) {
+      builder.addSweep(rows, new Color(1, 1, 1), uvV, [0, 0.2, 0.36, 0.5, 0.64, 0.8, 1]);
+    }
   }
 
   // Lineside canal.
@@ -688,8 +835,9 @@ export function buildWaterways(ctx: ChunkContext): void {
     const uvV: number[] = [];
     for (let i = 0; i < ctx.samples.length; i += 3) {
       const sample = ctx.samples[i];
-      const centre = sample.riverSide * (46 + ctx.field.noise.hills.sample(sample.s * 0.0015, 3.1) * 26);
-      const width = 9 + ctx.field.noise.detail.sample(sample.s * 0.004, 7.7) * 5;
+      const centre = canalCentre(sample, ctx.field.noise);
+      const width = canalWidth(sample, ctx.field.noise);
+      const level = canalLevel(sample);
       const row: Vector3[] = [];
       for (const off of [-width * 0.42, 0, width * 0.42]) {
         const lat = centre + off;
@@ -697,9 +845,8 @@ export function buildWaterways(ctx: ChunkContext): void {
         const rz = Math.cos(sample.heading);
         const x = sample.x + rx * lat;
         const z = sample.z + rz * lat;
-        const bed = ctx.field.ground(sample, lat, x, z);
-        row.push(new Vector3(x, bed + 1.35, z));
-        depths.push(1.35);
+        row.push(new Vector3(x, level, z));
+        depths.push(Math.max(0.1, level - ctx.field.ground(sample, lat, x, z)));
       }
       rows.push(row);
       uvV.push(sample.s * 0.05);
@@ -803,18 +950,21 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
   const first = ctx.samples[0];
   const built = blendedAttr(first.weights, 'buildingDensity');
 
-  // Boundary fence where the line runs through built-up land.
+  // Boundary fence where the line runs through built-up land. It stands on the
+  // ground, not on the plane of the rails, so it is placed in world space and
+  // squared to the line rather than rolled with the cant.
   if (built > 0.4) {
     for (const side of [-1, 1]) {
       const lat = side * 9.4;
       for (let s = ctx.sStart; s < ctx.sEnd; s += 3) {
         const p = place(ctx, s, lat);
         if (!p || p.sample.structure !== 0) continue;
+        const yaw = alignedYaw(p.sample.heading);
         scale.set(0.07, 1.3, 0.07);
-        trackMatrix(p.sample, lat, p.y - p.sample.y, matrix, 0, scale);
+        groundMatrix(p.x, p.y, p.z, yaw, matrix, scale);
         builder.add(unitBox(), matrix, grey);
         scale.set(0.04, 0.04, 3.05);
-        trackMatrix(p.sample, lat, p.y - p.sample.y + 1.15, matrix, 0, scale);
+        groundMatrix(p.x, p.y + 1.15, p.z, yaw, matrix, scale);
         builder.add(unitBox(), matrix, grey);
       }
     }
@@ -824,14 +974,15 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
   for (let s = Math.ceil(ctx.sStart / 180) * 180; s < ctx.sEnd; s += 180) {
     const p = place(ctx, s, -8.4);
     if (!p || p.sample.structure !== 0) continue;
+    const yaw = alignedYaw(p.sample.heading);
     scale.set(1.15, 0.16, 0.85);
-    trackMatrix(p.sample, -8.4, p.y - p.sample.y - 0.05, matrix, 0, scale);
+    groundMatrix(p.x, p.y - 0.05, p.z, yaw, matrix, scale);
     builder.add(unitBox(), matrix, grey);
     scale.set(0.9, 1.3, 0.6);
-    trackMatrix(p.sample, -8.4, p.y - p.sample.y + 0.11, matrix, 0, scale);
+    groundMatrix(p.x, p.y + 0.11, p.z, yaw, matrix, scale);
     builder.add(unitBox(), matrix, green);
     scale.set(1.0, 0.08, 0.7);
-    trackMatrix(p.sample, -8.4, p.y - p.sample.y + 1.41, matrix, 0, scale);
+    groundMatrix(p.x, p.y + 1.41, p.z, yaw, matrix, scale);
     builder.add(unitBox(), matrix, green);
   }
 
@@ -840,13 +991,14 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
   for (let s = Math.ceil(ctx.sStart / 100) * 100; s < ctx.sEnd; s += 100) {
     const p = place(ctx, s, 7.4);
     if (!p || p.sample.structure !== 0) continue;
+    const yaw = alignedYaw(p.sample.heading);
     const whole = Math.abs(s % 1000) < 1;
     scale.set(0.16, whole ? 1.35 : 0.8, 0.16);
-    trackMatrix(p.sample, 7.4, p.y - p.sample.y, matrix, 0, scale);
+    groundMatrix(p.x, p.y, p.z, yaw, matrix, scale);
     builder.add(unitBox(), matrix, post);
     if (whole) {
       scale.set(0.44, 0.34, 0.07);
-      trackMatrix(p.sample, 7.4, p.y - p.sample.y + 1.05, matrix, 0, scale);
+      groundMatrix(p.x, p.y + 1.05, p.z, yaw, matrix, scale);
       builder.add(unitBox(), matrix, post);
     }
   }
@@ -867,12 +1019,14 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
     const p = place(ctx, s, lateral);
     if (!p) continue;
     if (p.sample.structure !== 0 && Math.abs(lateral) < 26) continue;
+    if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 1)) continue;
+    if (!ctx.sites.free(p.x, p.z, 2)) continue;
     const rocky =
       p.sample.weights[BIOME_INDEX.mountain] * 1.2 + p.sample.weights[BIOME_INDEX.coast] * 0.9;
     if (!ctx.rng.chance(clamp01(rocky * 0.5))) continue;
     const size = ctx.rng.range(0.6, 3.4);
     scale.set(size * ctx.rng.range(0.8, 1.6), size * ctx.rng.range(0.5, 1.1), size * ctx.rng.range(0.8, 1.6));
-    trackMatrix(p.sample, lateral, p.y - p.sample.y - size * 0.2, matrix, ctx.rng.range(0, 6.28), scale);
+    groundMatrix(p.x, p.y - size * 0.2, p.z, ctx.rng.range(0, 6.28), matrix, scale);
     const shade = ctx.rng.range(0.55, 0.95);
     rockColor.setRGB(shade, shade * 0.98, shade * 0.94);
     rocks.push(matrix, rockColor);

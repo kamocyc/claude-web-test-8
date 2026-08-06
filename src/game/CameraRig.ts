@@ -216,7 +216,6 @@ export class CameraRig {
       .addScaledVector(axisRight, consist.lateral - (inTunnel ? 3.0 : 5.5))
       .addScaledVector(axisUp, inTunnel ? 3.4 : 7.5);
     this.chasePosition.lerp(tmpA, 1 - Math.exp(-6 * dt));
-    camera.position.copy(this.chasePosition);
 
     const lookSample = this.track.sampleAt(trainS - 8);
     trackAxes(lookSample, axisRight, axisUp, axisFwd);
@@ -224,6 +223,22 @@ export class CameraRig {
       .set(lookSample.x, lookSample.y, lookSample.z)
       .addScaledVector(axisRight, consist.lateral)
       .addScaledVector(axisUp, 2.2);
+
+    // A fixed stand-off from the track puts the camera inside the hillside
+    // wherever the line runs through a cutting, along a shelf or up to a tunnel
+    // mouth, and the shot becomes a screen full of rock. Clear the ground under
+    // the camera, and the ground between it and the train as well - a bank
+    // halfway along the sight line hides the train just as completely as one
+    // the lens is buried in.
+    if (!inTunnel) {
+      const here = this.field.heightAt(this.chasePosition.x, this.chasePosition.z).y;
+      const midX = (this.chasePosition.x + this.target.x) * 0.5;
+      const midZ = (this.chasePosition.z + this.target.z) * 0.5;
+      const between = this.field.heightAt(midX, midZ).y;
+      this.chasePosition.y = Math.max(this.chasePosition.y, here + 2.4, between + 3.2);
+    }
+    camera.position.copy(this.chasePosition);
+
     camera.lookAt(this.target);
     camera.rotateY(this.yaw);
     camera.rotateX(this.pitch);
