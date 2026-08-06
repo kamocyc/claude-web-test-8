@@ -1,4 +1,4 @@
-import { Object3D, PerspectiveCamera, Quaternion, Vector3 } from 'three';
+import { Euler, Object3D, PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import type { Consist } from '../train/Consist';
 import { STRUCT_TUNNEL, type TrackPath } from '../world/TrackPath';
 import type { TerrainField } from '../world/TerrainField';
@@ -28,6 +28,18 @@ const quat = new Quaternion();
 const windowRight = new Vector3();
 const windowUp = new Vector3();
 const windowOrigin = new Vector3();
+const panAxis = new Vector3();
+const lookEuler = new Euler(0, 0, 0, 'YXZ');
+
+/** How far the camera may be slid sideways in each view, in metres. */
+const PAN_LIMIT: Record<CameraMode, number> = {
+  cab: 0.85,
+  window: 2.2,
+  chase: 20,
+  lineside: 30,
+  nose: 1.6,
+  roof: 1.6,
+};
 
 /**
  * Camera work.
@@ -41,6 +53,8 @@ export class CameraRig {
   mode: CameraMode = 'cab';
   yaw = 0;
   pitch = 0;
+  /** Sideways offset the player has slid the view to, in metres. */
+  panOffset = 0;
   /** Vibration multiplier from the settings. */
   shake = 1;
 
@@ -64,22 +78,35 @@ export class CameraRig {
 
   cycle(): void {
     const index = CAMERA_MODES.indexOf(this.mode);
-    this.mode = CAMERA_MODES[(index + 1) % CAMERA_MODES.length];
-    this.yaw = 0;
-    this.pitch = 0;
-    this.lineSideValidUntil = -1;
+    this.setMode(CAMERA_MODES[(index + 1) % CAMERA_MODES.length]);
   }
 
   setMode(mode: CameraMode): void {
     this.mode = mode;
+    this.recentre();
+    this.lineSideValidUntil = -1;
+  }
+
+  /** Puts the view back where the shot was framed to be seen from. */
+  recentre(): void {
     this.yaw = 0;
     this.pitch = 0;
-    this.lineSideValidUntil = -1;
+    this.panOffset = 0;
   }
 
   look(dYaw: number, dPitch: number): void {
     this.yaw = clamp(this.yaw + dYaw, -Math.PI * 0.95, Math.PI * 0.95);
     this.pitch = clamp(this.pitch + dPitch, -0.8, 0.7);
+  }
+
+  /**
+   * Slides the view sideways. In the cab that is the driver leaning across to
+   * see round a pillar or out along the train; in the outside views it walks
+   * the shot across the line.
+   */
+  pan(delta: number): void {
+    const limit = PAN_LIMIT[this.mode];
+    this.panOffset = clamp(this.panOffset + delta, -limit, limit);
   }
 
   /**
@@ -139,19 +166,58 @@ export class CameraRig {
         break;
     }
 
+    // Every shot above leaves the camera framed as its author intended; the
+    // player's own pan and free look are laid on top of that, in one place, so
+    // that they behave the same way whichever view is up.
+    this.applyPan(camera);
+    this.applyLook(camera);
+
     if (!this.initialised) {
       this.chasePosition.copy(camera.position);
       this.initialised = true;
     }
   }
 
+  /**
+   * Slides the framed shot sideways, along the horizontal right of whatever it
+   * was already looking down. Taking the axis from the shot rather than from
+   * the free look means leaning left stays leaning left even when the player
+   * has turned to look out of the side window.
+   */
+  private applyPan(camera: PerspectiveCamera): void {
+    if (this.panOffset === 0) return;
+    panAxis.set(1, 0, 0).applyQuaternion(camera.quaternion);
+    panAxis.y = 0;
+    if (panAxis.lengthSq() < 1e-6) return;
+    camera.position.addScaledVector(panAxis.normalize(), this.panOffset);
+  }
+
+  /**
+   * Free look, added to whatever the shot is already pointing at.
+   *
+   * Turning about the camera's own axes is what used to tilt the horizon: as
+   * soon as the framing carries any pitch - a car on a grade, a chase shot
+   * looking down at the train - the camera's local Y is no longer up, and a yaw
+   * about it rolls the whole frame. Decomposing into yaw about world up, pitch
+   * about the turned right axis and roll about the view axis, adding the look
+   * to the first two and leaving the third alone, keeps the horizon exactly as
+   * level as the shot itself put it, however far round the player looks. What
+   * roll remains is the real thing: the cant the car is leaning at.
+   */
+  private applyLook(camera: PerspectiveCamera): void {
+    lookEuler.setFromQuaternion(camera.quaternion);
+    lookEuler.y += this.yaw + this.swayX;
+    // Short of straight up or straight down, where yaw and roll would collapse
+    // into each other and the view would spin.
+    lookEuler.x = clamp(lookEuler.x + this.pitch + this.swayY, -1.5, 1.5);
+    camera.quaternion.setFromEuler(lookEuler);
+  }
+
   private updateCab(camera: PerspectiveCamera, consist: Consist, leadCar: Object3D): void {
     consist.getEyeWorld(this.position);
     camera.position.copy(this.position);
-    camera.quaternion.copy(leadCar.quaternion);
     // The car's local -Z is forward, which is exactly where the camera looks.
-    camera.rotateY(this.yaw + this.swayX);
-    camera.rotateX(this.pitch + this.swayY);
+    camera.quaternion.copy(leadCar.quaternion);
   }
 
   private updateAttached(
@@ -162,8 +228,6 @@ export class CameraRig {
     tmpA.copy(localOffset).applyMatrix4(leadCar.matrixWorld);
     camera.position.copy(tmpA);
     camera.quaternion.copy(leadCar.quaternion);
-    camera.rotateY(this.yaw + this.swayX);
-    camera.rotateX(this.pitch + this.swayY);
   }
 
   /**
@@ -195,8 +259,6 @@ export class CameraRig {
       .addScaledVector(windowUp, -4);
     camera.up.set(0, 1, 0);
     camera.lookAt(tmpB);
-    camera.rotateY(this.yaw + this.swayX);
-    camera.rotateX(this.pitch + this.swayY);
   }
 
   /** Swaps the window view to the other side of the train. */
@@ -238,10 +300,8 @@ export class CameraRig {
       this.chasePosition.y = Math.max(this.chasePosition.y, here + 2.4, between + 3.2);
     }
     camera.position.copy(this.chasePosition);
-
+    camera.up.set(0, 1, 0);
     camera.lookAt(this.target);
-    camera.rotateY(this.yaw);
-    camera.rotateX(this.pitch);
   }
 
   private updateLineside(camera: PerspectiveCamera, consist: Consist, trainS: number): void {
@@ -284,9 +344,8 @@ export class CameraRig {
     }
     camera.position.copy(this.lineSideAnchor);
     consist.cars[0].group.getWorldPosition(tmpB);
+    camera.up.set(0, 1, 0);
     camera.lookAt(tmpB.x, tmpB.y + 2.0, tmpB.z);
-    camera.rotateY(this.yaw);
-    camera.rotateX(this.pitch);
   }
 
   /** Quaternion of the lead car, used to orient audio. */

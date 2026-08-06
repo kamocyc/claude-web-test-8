@@ -41,6 +41,8 @@ controller with it — traction is cut electrically instead.
 | `Enter` | Horn (low) |
 | `Shift` + `Enter` | Horn (high) |
 | `C` | Change camera; `Shift`+`C` flips the window view to the other side |
+| `←` / `→` | Slide the view sideways — lean across the cab to see round a pillar |
+| `R` | Put the view back where it started |
 | `F` | Automatic driving on/off |
 | `B` | Skip ahead to the next landscape |
 | `U` | Hide the cab display |
@@ -51,6 +53,7 @@ controller with it — traction is cut electrically instead.
 | `P`, `Esc` | Pause |
 | `F3` | Performance overlay |
 | Mouse drag | Look around |
+| Right-button drag | Slide the view sideways |
 
 The job is the same as a real driver's: run at or below the permitted speed,
 stop with the cab against the stopping marker at the far end of each platform,

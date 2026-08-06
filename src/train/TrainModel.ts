@@ -1,6 +1,7 @@
 import {
   BufferGeometry,
   Color,
+  DoubleSide,
   Group,
   Matrix4,
   Mesh,
@@ -175,14 +176,58 @@ function doorPositions(halfL: number): number[] {
  * How much the section narrows at a cab end.
  *
  * A Japanese commuter cab is close to full width with the corners drawn in
- * over the last couple of metres, not a wedge: the taper is small and dies out
- * quickly, and it is only applied to the width, so the floor and roof lines run
- * straight through to the front.
+ * over the last metre, not a wedge. It has to stay small: the cab, its desk and
+ * the saloon lining all stand a few centimetres inside the shell, and a taper
+ * that ate any further into the width pulled the bodyside in behind them and
+ * left the furniture hanging out through the side of the train.
  */
+const CAB_TAPER_LENGTH = 1.1;
+const CAB_TAPER = 0.03;
+/** Scale of the section at the very front of a driving car. */
+const NOSE_SCALE = 1 - CAB_TAPER;
+/**
+ * Widest anything inside the shell may be. The bodyside is at 1.475 and draws
+ * in to 1.431 at the cab front, so everything fitted inside stops short of it.
+ */
+const INNER_HALF = 1.31;
+
 function noseTaper(z: number, front: number, isCab: boolean): number {
   if (!isCab) return 1;
-  const t = Math.max(0, (front + 2.3 - z) / 2.3);
-  return 1 - t * t * 0.085;
+  const t = Math.max(0, (front + CAB_TAPER_LENGTH - z) / CAB_TAPER_LENGTH);
+  return 1 - t * t * CAB_TAPER;
+}
+
+/** Half width of a section polyline at a height, both being ordered upwards. */
+function sectionHalfAt(section: Section[], y: number): number {
+  if (y <= section[0].y) return section[0].x;
+  for (let i = 1; i < section.length; i++) {
+    if (y <= section[i].y) {
+      const p = section[i - 1];
+      const q = section[i];
+      const t = (y - p.y) / Math.max(1e-6, q.y - p.y);
+      return p.x + (q.x - p.x) * t;
+    }
+  }
+  return section[section.length - 1].x;
+}
+
+/**
+ * Half width of the shell at a height, read off the same sections the body is
+ * swept from.
+ *
+ * The cab front is built as a cap on the end of the body, so its outline has to
+ * be the body's own silhouette at every height - otherwise the mask stands
+ * proud of the sides at one height and inside them at another, which is exactly
+ * what a front built out of boxes does.
+ */
+function bodyHalfAt(y: number): number {
+  // Below the solebar the section closes to a point on the centre line - it is
+  // the underside of the car, not a side. Read literally it gives the cab front
+  // a zero width bottom edge, and every point on that row divides by it.
+  if (y < 1.11) return sectionHalfAt(LOWER_HALF, 1.11);
+  if (y < SILL) return sectionHalfAt(LOWER_HALF, y);
+  if (y > HEAD) return sectionHalfAt(UPPER_HALF, y);
+  return HALF_WIDTH;
 }
 
 export function createCar(options: CarOptions): CarModel {
@@ -190,6 +235,14 @@ export function createCar(options: CarOptions): CarModel {
   const shell = new MeshBuilder();
   const under = new MeshBuilder();
   const glass = new MeshBuilder();
+  // The windscreen is glazed separately from the saloon. Saloon glass is a dark
+  // near-opaque pane, which is right seen from the lineside and hopeless seen
+  // through: put the cab screen in it and the driver spends the game looking at
+  // the line through a tinted filter.
+  const screen = new MeshBuilder();
+  // The cab front is a moulded FRP mask, not a welded stainless side: given the
+  // bodyside material it wears the rolled beading of a carbody down its nose.
+  const mask = new MeshBuilder();
   const interior = new MeshBuilder();
 
   const L = options.length;
@@ -258,34 +311,83 @@ export function createCar(options: CarOptions): CarModel {
   for (const side of [-1, 1]) {
     const x = side * HALF_WIDTH;
 
-    // Saloon bays: the gaps between consecutive doors, plus the two ends.
-    const bounds: [number, number][] = [];
-    const endClear = options.isCab ? 3.4 : 0.72;
-    bounds.push([front + endClear, doors[0] - DOOR_WIDTH / 2 - 0.16]);
+    // Saloon bays: the gaps between consecutive doors, plus the two ends. A
+    // driving car gets one more at the very front - the cab side window, which
+    // is what lets the driver look back along the train at a platform and what
+    // stops the cab reading as a sealed box from outside.
+    // The third field marks the cab window: it is glazed clear rather than in
+    // the dark pane the saloon gets, because it is one the player looks out of
+    // rather than into.
+    const bounds: [number, number, boolean][] = [];
+    const endClear = options.isCab ? 3.3 : 0.72;
+    if (options.isCab) bounds.push([front + 0.42, front + 2.3, true]);
+    bounds.push([front + endClear, doors[0] - DOOR_WIDTH / 2 - 0.16, false]);
     for (let i = 0; i < doors.length - 1; i++) {
-      bounds.push([doors[i] + DOOR_WIDTH / 2 + 0.16, doors[i + 1] - DOOR_WIDTH / 2 - 0.16]);
+      bounds.push([doors[i] + DOOR_WIDTH / 2 + 0.16, doors[i + 1] - DOOR_WIDTH / 2 - 0.16, false]);
     }
-    bounds.push([doors[doors.length - 1] + DOOR_WIDTH / 2 + 0.16, rear - 0.72]);
+    bounds.push([doors[doors.length - 1] + DOOR_WIDTH / 2 + 0.16, rear - 0.72, false]);
 
-    for (const [z0, z1] of bounds) {
+    // The shell is swept in two strips, so the window band is a genuine gap in
+    // it: anywhere along the band that gets neither a bay nor a door has to be
+    // panelled over, or the car has a slot through its side. Beside the cab
+    // that slot looked straight out at the sky from the driver's seat. The
+    // panel sits at the inner face of the sill edge, which is where a blanked
+    // window is on the prototype - flush enough to read as bodyside, and well
+    // inside the draw-in at the nose so it cannot come out through the side.
+    if (options.isCab) {
+      for (const [z0, z1] of [
+        [front, front + 0.42],
+        [front + 2.3, front + endClear],
+      ] as [number, number][]) {
+        if (z1 - z0 < 0.05) continue;
+        matrix.makeScale(0.05, bandH, z1 - z0);
+        matrix.setPosition(side * (HALF_WIDTH * 0.965 - 0.025), SILL, (z0 + z1) / 2);
+        shell.add(unitBox(), matrix, bodyColor);
+        // Lined on the inside, so the driver sees cab trim beside them rather
+        // than the back of the bodyside.
+        matrix.makeScale(0.05, bandH, z1 - z0);
+        matrix.setPosition(side * (INNER_HALF - 0.03), SILL, (z0 + z1) / 2);
+        interior.add(unitBox(), matrix, new Color(0.21, 0.22, 0.24));
+      }
+    }
+
+    for (const [z0, z1, isCabWindow] of bounds) {
       if (z1 - z0 < 0.5) continue;
-      const panes = Math.max(1, Math.round((z1 - z0) / 1.55));
+      const into = isCabWindow ? screen : glass;
+      const tint = isCabWindow ? new Color(0.5, 0.58, 0.66) : new Color(0.07, 0.1, 0.13);
+      // The cab side is a driver's door and a quarter light behind it, so it
+      // takes a shorter pane pitch than a saloon bay.
+      const panes = Math.max(1, Math.round((z1 - z0) / (isCabWindow ? 0.95 : 1.55)));
       const pitch = (z1 - z0) / panes;
       for (let k = 0; k < panes; k++) {
         const zc = z0 + pitch * (k + 0.5);
         const paneLen = pitch - 0.12;
-        // Black rubber surround, then the glass set a little inside it.
-        matrix.makeScale(0.05, bandH, paneLen);
+        // Rubber gasket, as a frame around the pane and not a panel behind it.
+        // Built as a block it stood between the glass and the saloon and turned
+        // every window on the train into a black rectangle - and, in the cab,
+        // walled the driver in on the side they look out of at a platform.
+        matrix.makeScale(0.05, paneInset, paneLen);
         matrix.setPosition(x - side * 0.025, SILL, zc);
         interior.add(unitBox(), matrix, rubber);
+        matrix.setPosition(x - side * 0.025, HEAD - paneInset, zc);
+        interior.add(unitBox(), matrix, rubber);
+        for (const end of [-1, 1]) {
+          matrix.makeScale(0.05, bandH - paneInset * 2, paneInset);
+          matrix.setPosition(
+            x - side * 0.025,
+            SILL + paneInset,
+            zc + end * ((paneLen - paneInset) / 2),
+          );
+          interior.add(unitBox(), matrix, rubber);
+        }
         matrix.makeScale(0.03, bandH - paneInset * 2, paneLen - paneInset * 2);
-        matrix.setPosition(x - side * 0.008, SILL + paneInset, zc);
-        glass.add(unitBox(), matrix, new Color(0.07, 0.1, 0.13));
+        matrix.setPosition(x - side * 0.02, SILL + paneInset, zc);
+        into.add(unitBox(), matrix, tint);
       }
       // Pillars between the bays.
       for (let k = 1; k < panes; k++) {
         matrix.makeScale(0.07, bandH, 0.12);
-        matrix.setPosition(x - side * 0.01, SILL, z0 + pitch * k);
+        matrix.setPosition(x - side * 0.035, SILL, z0 + pitch * k);
         shell.add(unitBox(), matrix, bodyColor);
       }
     }
@@ -314,12 +416,11 @@ export function createCar(options: CarOptions): CarModel {
         matrix.makeScale(0.05, frame, leafW - 0.02);
         matrix.setPosition(x - side * 0.012, HEAD - frame + 0.04, zc);
         shell.add(unitBox(), matrix, bodyColor);
-        // Door glass, set in a rubber gasket.
-        matrix.makeScale(0.045, HEAD - SILL - 0.1, leafW - 0.04 - frame * 2);
-        matrix.setPosition(x - side * 0.006, SILL + 0.02, zc);
-        interior.add(unitBox(), matrix, rubber);
+        // Door glass. The stiles and the head rail are the gasket, so there is
+        // nothing behind the pane: a closed door lets the saloon show through
+        // as the real one does.
         matrix.makeScale(0.03, HEAD - SILL - 0.16, leafW - 0.1 - frame * 2);
-        matrix.setPosition(x - side * 0.002, SILL + 0.05, zc);
+        matrix.setPosition(x - side * 0.02, SILL + 0.05, zc);
         glass.add(unitBox(), matrix, new Color(0.07, 0.1, 0.13));
       }
       // Door frame: the pocket line each side and the header above.
@@ -331,9 +432,10 @@ export function createCar(options: CarOptions): CarModel {
       matrix.makeScale(0.055, 0.07, DOOR_WIDTH + 0.14);
       matrix.setPosition(x - side * 0.03, DOOR_TOP, dz);
       interior.add(unitBox(), matrix, rubber);
-      // Centre seal where the leaves meet.
+      // Centre seal where the leaves meet, standing no further out than the
+      // leaves it seals between.
       matrix.makeScale(0.06, DOOR_TOP - FLOOR, 0.05);
-      matrix.setPosition(x - side * 0.005, FLOOR, dz);
+      matrix.setPosition(x - side * 0.018, FLOOR, dz);
       interior.add(unitBox(), matrix, rubber);
       // Threshold plate, and the yellow warning line on the door pocket that
       // every Japanese commuter door carries.
@@ -425,7 +527,8 @@ export function createCar(options: CarOptions): CarModel {
     if (Math.abs(rz) > halfL - 3.4) continue;
     const res = new Matrix4().makeScale(0.3, 1.7, 0.3);
     res.premultiply(new Matrix4().makeRotationX(Math.PI / 2));
-    res.premultiply(new Matrix4().makeTranslation(rx, UNDERFRAME - 0.28, rz));
+    // Likewise the reservoirs, which are hung about their own middle.
+    res.premultiply(new Matrix4().makeTranslation(rx, UNDERFRAME - 0.28, rz - 0.85));
     under.add(unitCylinder(10), res, equipGrey);
   }
 
@@ -516,6 +619,7 @@ export function createCar(options: CarOptions): CarModel {
   const bogieGeometry = getBogieGeometry();
   for (const bz of bogieZ) {
     const bogie = new Mesh(bogieGeometry, getUnderframeMaterial());
+    bogie.name = 'car-bogie';
     bogie.position.set(0, 0, bz);
     bogie.castShadow = true;
     bogie.matrixAutoUpdate = false;
@@ -528,6 +632,7 @@ export function createCar(options: CarOptions): CarModel {
   if (options.hasPantograph) {
     pantograph = new Group();
     const pan = new Mesh(getPantographGeometry(), getUnderframeMaterial());
+    pan.name = 'car-pantograph';
     pan.castShadow = true;
     pan.matrixAutoUpdate = false;
     pantograph.add(pan);
@@ -550,9 +655,9 @@ export function createCar(options: CarOptions): CarModel {
   const taillights: Mesh[] = [];
   if (options.isCab) {
     buildCabFront({
-      shell,
+      shell: mask,
       under,
-      glass,
+      screen,
       interior,
       group,
       front,
@@ -572,15 +677,34 @@ export function createCar(options: CarOptions): CarModel {
     shellMesh.receiveShadow = true;
     group.add(shellMesh);
   }
+  const maskMesh = mask.toMesh(
+    new MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.42,
+      metalness: 0.12,
+      envMapIntensity: 1.1,
+    }),
+    true,
+    'car-cab-front',
+  );
+  if (maskMesh) {
+    maskMesh.userData.ownsMaterial = true;
+    maskMesh.castShadow = true;
+    maskMesh.receiveShadow = true;
+    group.add(maskMesh);
+  }
   const underMesh = under.toMesh(getUnderframeMaterial(), false, 'car-underframe');
   if (underMesh) {
     underMesh.castShadow = true;
     underMesh.receiveShadow = true;
     group.add(underMesh);
   }
+  // Normals are recomputed: swept surfaces are added with a placeholder normal
+  // and only get a real one here, so a trim panel left out of the recompute is
+  // lit as though it were lying flat and glows against the glass.
   const interiorMesh = interior.toMesh(
     new MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.06 }),
-    false,
+    true,
     'car-interior',
   );
   if (interiorMesh) {
@@ -594,12 +718,23 @@ export function createCar(options: CarOptions): CarModel {
     glassMesh.userData.ownsMaterial = true;
     group.add(glassMesh);
   }
+  // The windscreen: barely tinted, but glossy enough to catch the sky, so it
+  // reads as glass from the lineside and as clear air from the driver's seat.
+  const screenMaterial = createGlassMaterial(0x8ea6b8, 0.16);
+  screenMaterial.vertexColors = true;
+  screenMaterial.side = DoubleSide;
+  const screenMesh = screen.toMesh(screenMaterial, true, 'car-windscreen');
+  if (screenMesh) {
+    screenMesh.userData.ownsMaterial = true;
+    group.add(screenMesh);
+  }
 
   // Saloon lighting, seen through the glazing after dark.
   const interiorLights: Mesh[] = [];
   const interiorMaterial = new MeshBasicMaterial({ color: 0x000000 });
   for (const lx of [-0.72, 0.72]) {
     const light = new Mesh(unitBox(), interiorMaterial);
+    light.name = 'car-saloon-light';
     light.scale.set(0.34, 0.06, L - 3.4);
     light.position.set(lx, 3.24, 0);
     group.add(light);
@@ -623,7 +758,7 @@ export function createCar(options: CarOptions): CarModel {
 interface CabFrontArgs {
   shell: MeshBuilder;
   under: MeshBuilder;
-  glass: MeshBuilder;
+  screen: MeshBuilder;
   interior: MeshBuilder;
   group: Group;
   front: number;
@@ -633,6 +768,73 @@ interface CabFrontArgs {
   headlights: Mesh[];
   taillights: Mesh[];
   destination?: string;
+}
+
+// --- the shape of the mask ---------------------------------------------------
+
+/** Bottom of the windscreen aperture. */
+const SCREEN_SILL = 2.05;
+/** Top of the windscreen aperture. */
+const SCREEN_HEAD = 3.07;
+/** Half width of the aperture: the screen is very nearly the full body width. */
+const SCREEN_HALF = 1.2;
+/** The pillar between the two panes, offset to the driver's right. */
+const SPLIT_LEFT = 0.1;
+const SPLIT_RIGHT = 0.34;
+/** Top of the black header carrying the indicators. */
+const HEADER_TOP = 3.34;
+
+/**
+ * How far forward of the body end the mask stands, at each height.
+ *
+ * This profile is the whole shape of the face seen from the side: it grows out
+ * of the underframe, is fullest at the windscreen sill, rakes steeply back over
+ * the screen and dies away to nothing where it meets the roof. Read against
+ * `bodyHalfAt`, which gives the outline in plan, it makes a moulding rather
+ * than a slab.
+ */
+const REACH_PROFILE: [number, number][] = [
+  [0.26, 0.34],
+  [0.62, 0.44],
+  [0.95, 0.50],
+  [1.45, 0.545],
+  [1.96, 0.56],
+  [SCREEN_SILL, 0.555],
+  [SCREEN_HEAD, 0.30],
+  [HEADER_TOP, 0.20],
+  [3.46, 0.11],
+  [3.58, 0.04],
+  [ROOF, 0.0],
+];
+
+function faceReach(y: number): number {
+  if (y <= REACH_PROFILE[0][0]) return REACH_PROFILE[0][1];
+  for (let i = 1; i < REACH_PROFILE.length; i++) {
+    if (y <= REACH_PROFILE[i][0]) {
+      const [y0, r0] = REACH_PROFILE[i - 1];
+      const [y1, r1] = REACH_PROFILE[i];
+      return r0 + (r1 - r0) * ((y - y0) / (y1 - y0));
+    }
+  }
+  return 0;
+}
+
+/** Half width of the mask, which is the body silhouette drawn in at the nose. */
+function faceHalf(y: number): number {
+  return bodyHalfAt(y) * NOSE_SCALE;
+}
+
+/**
+ * A point on the surface of the mask.
+ *
+ * The face is flat across the middle and turns back sharply at the corners -
+ * the power keeps the moulding from reading as a bullet nose - and it always
+ * meets the bodyside exactly, because at the silhouette the reach is zero.
+ */
+function facePoint(x: number, y: number, front: number, out = new Vector3()): Vector3 {
+  const half = Math.max(1e-3, faceHalf(y));
+  const t = Math.min(1, Math.abs(x) / half);
+  return out.set(x, y, front - faceReach(y) * (1 - Math.pow(t, 3)));
 }
 
 /**
@@ -646,90 +848,151 @@ interface CabFrontArgs {
  * camera except the cab itself, so it is built rather than suggested.
  */
 function buildCabFront(a: CabFrontArgs): void {
-  const { shell, under, glass, interior, group, front, bodyColor, blackout } = a;
+  const { shell, under, screen, interior, group, front, bodyColor, accentColor, blackout } = a;
   const matrix = new Matrix4();
   const darkGrey = new Color(0.17, 0.18, 0.19);
-  /** Distance forward of the body end, which is towards -z. */
-  const out = (d: number): number => front - d;
+  const trimGrey = new Color(0.2, 0.21, 0.23);
+  const roofGrey = new Color(0.72, 0.73, 0.74);
+  const glassTint = new Color(0.42, 0.5, 0.58);
+  const steel = new Color(0.66, 0.67, 0.68);
 
-  // The windscreen aperture. Everything the mask is built from is placed
-  // around it: the driver has to be able to see out, so the front cannot be a
-  // slab with glass painted on it.
-  const apertureLow = 1.90;
-  const apertureHigh = 2.96;
-  const headerHigh = 3.3;
-
-  // The mask, in panels that leave the aperture open, and with the corners
-  // stepped back so the moulding catches the light instead of reading as one
-  // flat face.
-  const maskPanel = (x0: number, x1: number, y0: number, y1: number, depth: number): void => {
-    matrix.makeScale(x1 - x0, y1 - y0, depth);
-    matrix.setPosition((x0 + x1) / 2, y0, out(depth / 2));
-    shell.add(unitBox(), matrix, bodyColor);
+  /**
+   * One horizontal band of the mask, as a strip of quads following the moulded
+   * surface between two heights.
+   *
+   * The x limits are given at the middle of the band and scaled row by row with
+   * the silhouette, so a band asked for the full width ends exactly on the
+   * bodyside at every height it spans rather than cutting inside it at one end
+   * and hanging out past it at the other.
+   *
+   * `inner` also lays a trim panel just behind the band facing back into the
+   * cab: the driver sits close enough to see the back of the mask, and a
+   * single-sided shell is simply not there from that side.
+   */
+  const band = (
+    y0: number,
+    y1: number,
+    x0: number,
+    x1: number,
+    color: Color,
+    into: MeshBuilder = shell,
+    inner = true,
+    trimColor: Color = trimGrey,
+  ): void => {
+    const reference = faceHalf((y0 + y1) / 2);
+    const cols = Math.max(3, Math.round(Math.abs(x1 - x0) / 0.16));
+    const rows: Vector3[][] = [];
+    const trim: Vector3[][] = [];
+    for (const y of [y0, y1]) {
+      const scale = faceHalf(y) / reference;
+      const row: Vector3[] = [];
+      const back: Vector3[] = [];
+      // Columns run from the higher x to the lower one, which is the winding
+      // that faces the swept surface forwards.
+      for (let i = 0; i <= cols; i++) {
+        const x = (Math.max(x0, x1) - (Math.abs(x1 - x0) * i) / cols) * scale;
+        const p = facePoint(x, y, front);
+        row.push(p);
+        back.push(new Vector3(p.x, p.y, p.z + 0.05));
+      }
+      rows.push(row);
+      trim.push(back);
+    }
+    const u = rows[0].map((_, i) => i * 0.16);
+    into.addSweep(rows, color, [y0 * 0.5, y1 * 0.5], u, false);
+    // Reversed row order flips the winding, so the trim faces back at the cab.
+    if (inner) interior.addSweep([trim[1], trim[0]], trimColor, [y1 * 0.5, y0 * 0.5], u, false);
   };
-  maskPanel(-1.06, 1.06, 0.62, apertureLow, 0.34);
-  maskPanel(-1.34, -1.06, 0.62, headerHigh, 0.24);
-  maskPanel(1.06, 1.34, 0.62, headerHigh, 0.24);
-  maskPanel(-1.06, -0.98, apertureLow, apertureHigh, 0.34);
-  maskPanel(0.98, 1.06, apertureLow, apertureHigh, 0.34);
-  maskPanel(-1.06, 1.06, apertureHigh, headerHigh, 0.34);
-  // Roof fairing over the top of the mask, carrying the horn covers.
-  matrix.makeScale(2.5, 0.3, 0.42);
-  matrix.setPosition(0, headerHigh - 0.02, out(0.17));
-  shell.add(unitBox(), matrix, new Color(0.72, 0.73, 0.74));
 
-  // Black glazing surround: a frame round the aperture rather than a panel
-  // across it, plus the pillar that splits the screen.
-  const surround = (x0: number, x1: number, y0: number, y1: number): void => {
-    matrix.makeScale(x1 - x0, y1 - y0, 0.07);
-    matrix.setPosition((x0 + x1) / 2, y0, out(0.37));
+  /** A point on the mask, lifted clear of the surface by `standoff` metres. */
+  const on = (x: number, y: number, standoff = 0): Vector3 => {
+    const p = facePoint(x, y, front);
+    p.z -= standoff;
+    return p;
+  };
+
+  // --- the mask ------------------------------------------------------------
+  // Built as bands of the moulded surface that leave the windscreen aperture
+  // open. The driver has to be able to see out, so the front cannot be a slab
+  // with glass painted on it - and the aperture is nearly the full width of the
+  // car, as it is on the prototype, because the one thing a cab front must
+  // never do is put structure across the driver's eyeline.
+  band(0.62, 0.95, -faceHalf(0.8), faceHalf(0.8), bodyColor);
+  band(0.95, 1.30, -faceHalf(1.1), faceHalf(1.1), bodyColor);
+  band(1.30, 1.67, -faceHalf(1.5), faceHalf(1.5), bodyColor);
+  // The livery band carries on round the front rather than stopping at the
+  // corner, which is what ties the face to the rest of the car.
+  band(1.67, 1.96, -faceHalf(1.8), faceHalf(1.8), accentColor);
+  band(1.96, SCREEN_SILL, -faceHalf(2.0), faceHalf(2.0), blackout, shell, true, blackout);
+
+  // Screen surround: a pillar at each corner, the one that splits the panes,
+  // and the black header over the top.
+  const pillarHalf = faceHalf((SCREEN_SILL + SCREEN_HEAD) / 2);
+  // Dark on the inside as well as out. A cab screen is surrounded by matt black
+  // for the same reason a camera lens hood is: anything pale round the glass is
+  // reflected in it and hangs in front of the line all day.
+  band(SCREEN_SILL, SCREEN_HEAD, SCREEN_HALF, pillarHalf, blackout, shell, true, blackout);
+  band(SCREEN_SILL, SCREEN_HEAD, -pillarHalf, -SCREEN_HALF, blackout, shell, true, blackout);
+  band(SCREEN_SILL, SCREEN_HEAD, SPLIT_LEFT, SPLIT_RIGHT, blackout, shell, true, blackout);
+  band(SCREEN_HEAD, HEADER_TOP, -faceHalf(3.2), faceHalf(3.2), blackout, shell, true, blackout);
+  // Over the header the moulding turns back onto the roof.
+  band(HEADER_TOP, 3.46, -faceHalf(3.4), faceHalf(3.4), roofGrey);
+  band(3.46, 3.58, -faceHalf(3.52), faceHalf(3.52), roofGrey);
+  band(3.58, ROOF, -faceHalf(3.61), faceHalf(3.61), roofGrey, shell, false);
+
+  // --- windscreen ----------------------------------------------------------
+  // Two panes lying on the same moulded surface as the mask, so the glass
+  // follows the curve of the face instead of being a flat sheet let into it.
+  const pane = (x0: number, x1: number): void => {
+    const cols = Math.max(4, Math.round((x1 - x0) / 0.14));
+    const low: Vector3[] = [];
+    const high: Vector3[] = [];
+    for (let i = 0; i <= cols; i++) {
+      const x = x1 - ((x1 - x0) * i) / cols;
+      low.push(on(x, SCREEN_SILL + 0.02, 0.012));
+      high.push(on(x, SCREEN_HEAD - 0.02, 0.012));
+    }
+    screen.addSweep([low, high], glassTint, [0, 1], low.map((_, i) => i * 0.2), false);
+  };
+  pane(-SCREEN_HALF + 0.03, SPLIT_LEFT);
+  pane(SPLIT_RIGHT, SCREEN_HALF - 0.03);
+
+  // --- emergency gangway door ----------------------------------------------
+  // Offset to the driver's right, as the prototype's is, running from the skirt
+  // up to the screen. Its shut lines are what breaks up the lower half of the
+  // face; above the sill the split pillar carries the same line on.
+  for (const dx of [SPLIT_LEFT - 0.02, SPLIT_RIGHT + 0.02]) {
+    matrix.makeScale(0.035, SCREEN_SILL - 0.7, 0.05);
+    matrix.setPosition(dx, 0.7, on(dx, 1.3, -0.02).z);
     interior.add(unitBox(), matrix, blackout);
-  };
-  surround(-1.22, 1.22, apertureLow - 0.14, apertureLow + 0.04);
-  surround(-1.22, 1.22, apertureHigh - 0.04, headerHigh);
-  surround(-1.22, -1.1, apertureLow, apertureHigh);
-  surround(1.1, 1.22, apertureLow, apertureHigh);
-  surround(0.1, 0.3, apertureLow, apertureHigh);
-
-  // Windscreen: two panes filling the aperture, raked back at the top.
-  for (const [x0, x1] of [[-1.14, 0.14], [0.26, 1.14]] as [number, number][]) {
-    const pane = new Matrix4().makeScale(x1 - x0, apertureHigh - apertureLow, 0.04);
-    pane.premultiply(new Matrix4().makeRotationX(-0.1));
-    pane.premultiply(
-      new Matrix4().makeTranslation((x0 + x1) / 2, (apertureLow + apertureHigh) / 2, out(0.38)),
-    );
-    glass.add(unitBox(), pane, new Color(0.44, 0.53, 0.62));
+  }
+  for (const hx of [SPLIT_LEFT + 0.07, SPLIT_RIGHT - 0.07]) {
+    matrix.makeScale(0.03, 0.72, 0.03);
+    matrix.setPosition(hx, 1.16, on(hx, 1.5, 0.035).z);
+    under.add(unitBox(), matrix, steel);
   }
 
-  // Emergency gangway door. It is offset to the driver's right, as the
-  // prototype's is, and its solid part stops at the bottom of the windscreen:
-  // above that the door is glazed and reads as part of the screen. Standing it
-  // up through the aperture would put a panel across the driver's eyeline,
-  // which is the one thing a cab front must never do.
-  matrix.makeScale(0.78, apertureLow - 0.66, 0.08);
-  matrix.setPosition(0.26, 0.66, out(0.38));
-  shell.add(unitBox(), matrix, bodyColor);
-  for (const hx of [-0.06, 0.58]) {
-    matrix.makeScale(0.05, 0.9, 0.05);
-    matrix.setPosition(hx, 0.85, out(0.43));
-    under.add(unitBox(), matrix, new Color(0.66, 0.67, 0.68));
-  }
-
-  // Destination indicator, let into the black header above the windscreen.
+  // --- indicators ----------------------------------------------------------
+  // Destination blind let into the black header, on the same side as the
+  // gangway door, with the route number panel beside it.
   if (a.destination) {
     const blind = new Mesh(
-      new PlaneGeometry(1.16, 0.26),
+      new PlaneGeometry(1.02, 0.23),
       new MeshBasicMaterial({ map: textures.destinationBlind(a.destination) }),
     );
-    blind.position.set(0.5, 3.11, out(0.42));
+    blind.position.copy(on(0.42, 3.2, 0.02));
+    blind.name = 'car-destination';
     blind.rotation.y = Math.PI;
+    // Laid back with the header it sits in, so it is read rather than glared at.
+    blind.rotation.x = -0.24;
     blind.userData.ownsGeometry = true;
     blind.userData.ownsMaterial = true;
     group.add(blind);
   }
 
-  // Lamp clusters low in each corner: two headlights beside a tail light in a
-  // black housing, the arrangement on every recent JR commuter cab.
+  // --- lamp clusters -------------------------------------------------------
+  // Low in each corner: two headlights beside a tail light in a black housing,
+  // the arrangement on every recent JR commuter cab.
   const headMaterial = new MeshBasicMaterial({ color: 0xfff4dd });
   const tailMaterial = new MeshBasicMaterial({ color: 0x330404 });
   const lensGeometry = revolved(
@@ -745,56 +1008,60 @@ function buildCabFront(a: CabFrontArgs): void {
   // Turned to face forward, i.e. down -z.
   lensGeometry.rotateX(-Math.PI / 2);
   for (const side of [-1, 1]) {
-    const cx = side * 0.96;
-    matrix.makeScale(0.76, 0.46, 0.1);
-    matrix.setPosition(cx, 1.12, out(0.38));
-    interior.add(unitBox(), matrix, blackout);
-
-    for (const lx of [-0.2, 0.06]) {
+    const cx = side * 0.93;
+    // The housing is a band of the face itself, set back into the moulding.
+    band(1.14, 1.48, cx - 0.29, cx + 0.29, blackout, interior, false);
+    for (const lx of [side * -0.19, side * 0.05]) {
       const lamp = new Mesh(lensGeometry, headMaterial);
-      lamp.scale.set(0.21, 0.21, 0.1);
-      lamp.position.set(cx + lx, 1.34, out(0.4));
+      lamp.name = 'car-headlight';
+      lamp.scale.set(0.2, 0.2, 0.12);
+      lamp.position.copy(on(cx + lx, 1.31, 0.02));
       lamp.userData.role = 'headlight';
       lamp.userData.ownsGeometry = true;
       group.add(lamp);
       a.headlights.push(lamp);
     }
     const tail = new Mesh(lensGeometry, tailMaterial.clone());
-    tail.scale.set(0.17, 0.17, 0.09);
-    tail.position.set(cx + 0.27, 1.34, out(0.4));
+    tail.name = 'car-taillight';
+    tail.scale.set(0.16, 0.16, 0.1);
+    tail.position.copy(on(cx + side * 0.25, 1.31, 0.02));
     tail.userData.ownsMaterial = true;
     tail.userData.ownsGeometry = true;
     group.add(tail);
     a.taillights.push(tail);
 
-    // Handrail up the corner of the mask.
-    const rail = new Matrix4().makeScale(0.05, 1.55, 0.05);
-    rail.setPosition(side * 1.3, 1.2, out(0.3));
-    under.add(unitCylinder(6), rail, new Color(0.66, 0.67, 0.68));
+    // Handrail up the corner of the mask, standing off the moulding.
+    const rail = new Matrix4().makeScale(0.035, 1.3, 0.035);
+    rail.setPosition(side * 1.26, 1.24, on(side * 1.26, 1.6, 0.035).z);
+    under.add(unitCylinder(6), rail, steel);
   }
 
-  // Skirt over the coupler, with the obstacle deflector below it.
-  matrix.makeScale(2.44, 0.62, 0.44);
-  matrix.setPosition(0, 0.36, out(0.26));
-  under.add(unitBox(), matrix, darkGrey);
-  matrix.makeScale(2.2, 0.1, 0.3);
-  matrix.setPosition(0, 0.3, out(0.34));
-  under.add(unitBox(), matrix, new Color(0.11, 0.12, 0.13));
-  matrix.makeScale(1.7, 0.16, 0.14);
-  matrix.setPosition(0, 0.14, out(0.36));
-  under.add(unitBox(), matrix, new Color(0.1, 0.11, 0.12));
-  // Coupler head, showing through the gap in the skirt.
-  matrix.makeScale(0.36, 0.3, 0.8);
-  matrix.setPosition(0, 0.5, out(0.55));
-  under.add(unitBox(), matrix, new Color(0.16, 0.17, 0.18));
-
-  // Wipers, parked along the bottom of each pane.
-  for (const wx of [-0.5, 0.74]) {
-    const arm = new Matrix4().makeScale(0.03, 0.9, 0.03);
-    arm.premultiply(new Matrix4().makeRotationZ(1.34));
-    arm.premultiply(new Matrix4().makeTranslation(wx, 1.44, out(0.44)));
+  // --- wipers --------------------------------------------------------------
+  // Parked along the bottom of each pane, on the outside of the glass and well
+  // inside its width. Stood up across the screen they read as a girder through
+  // the view, and hung off the corner they used to reach out past the bodyside.
+  for (const [wx, lean] of [[-1.05, -1.5], [1.05, 1.5]] as [number, number][]) {
+    const at = on(wx, SCREEN_SILL + 0.04, 0.04);
+    const arm = new Matrix4().makeScale(0.02, 0.8, 0.02);
+    arm.premultiply(new Matrix4().makeRotationZ(lean));
+    arm.premultiply(new Matrix4().makeTranslation(at.x, at.y, at.z));
     under.add(unitBox(), arm, new Color(0.1, 0.1, 0.11));
   }
+
+  // --- skirt ---------------------------------------------------------------
+  // Full width over the coupler, with the obstacle deflector under it. It is
+  // built from the same surface as the mask so it follows the plan of the face
+  // rather than sitting under it as a plain box.
+  band(0.44, 0.62, -faceHalf(0.8) * 0.95, faceHalf(0.8) * 0.95, darkGrey, shell, false);
+  const skirtEdge = facePoint(0, 0.46, front).z;
+  matrix.makeScale(2.2, 0.06, 0.2);
+  matrix.setPosition(0, 0.44, skirtEdge + 0.12);
+  under.add(unitBox(), matrix, new Color(0.11, 0.12, 0.13));
+  // Coupler head. It lives behind the skirt where the prototype's does; poking
+  // it out through the front was the rod that used to hang in mid air.
+  matrix.makeScale(0.34, 0.3, 0.7);
+  matrix.setPosition(0, 0.5, front + 0.05);
+  under.add(unitBox(), matrix, new Color(0.16, 0.17, 0.18));
 }
 
 // --- shared sub-assemblies --------------------------------------------------
@@ -843,7 +1110,7 @@ function getBogieGeometry(): BufferGeometry {
     // Axle.
     const axle = new Matrix4().makeScale(0.11, 1.34, 0.11);
     axle.premultiply(new Matrix4().makeRotationZ(Math.PI / 2));
-    axle.premultiply(new Matrix4().makeTranslation(-0.67, axleY, az));
+    axle.premultiply(new Matrix4().makeTranslation(0.67, axleY, az));
     b.add(unitCylinder(8), axle, steel);
     // Brake discs either side of the gearbox.
     for (const dx of [-0.3, 0.3]) {
@@ -902,7 +1169,7 @@ function getBogieGeometry(): BufferGeometry {
   b.add(unitBox(), matrix, frame);
   const motor = new Matrix4().makeScale(0.42, 0.86, 0.42);
   motor.premultiply(new Matrix4().makeRotationZ(Math.PI / 2));
-  motor.premultiply(new Matrix4().makeTranslation(-0.43, axleY + 0.02, half - 0.55));
+  motor.premultiply(new Matrix4().makeTranslation(0.43, axleY + 0.02, half - 0.55));
   b.add(unitCylinder(10), motor, dark);
   matrix.makeScale(0.42, 0.42, 0.34);
   matrix.setPosition(0.14, axleY - 0.16, half - 0.1);
@@ -1007,7 +1274,7 @@ function getPantographGeometry(): BufferGeometry {
 }
 
 /** Angle the wiper rests at when it is not sweeping: laid along the bottom. */
-export const WIPER_PARK = -1.34;
+export const WIPER_PARK = -1.5;
 
 /**
  * The driving cab, modelled from the driver's seat outwards: desk, handles,
@@ -1024,102 +1291,176 @@ export interface CabModel {
 export function createCab(carLength: number): CabModel {
   const group = new Group();
   const builder = new MeshBuilder();
-  const glass = new MeshBuilder();
+  const dark = new MeshBuilder();
   const matrix = new Matrix4();
 
-  const front = -(carLength / 2 - 0.25) - 0.02;
+  const front = -(carLength / 2 - 0.25);
   const floor = FLOOR;
-  const panel = new Color(0.19, 0.20, 0.22);
-  const desk = new Color(0.13, 0.14, 0.155);
-  const trim = new Color(0.40, 0.42, 0.44);
+  /** Back of the cab, where the bulkhead to the saloon stands. */
+  const back = front + 2.65;
+  /** Top of the console, at the height a driver rests a hand on it. */
+  const DESK = 1.92;
 
-  // Floor and the bulkhead behind the driver, with the door through to the
-  // saloon in it. The cab is a shallow box; the windscreen fills almost the
-  // whole forward view, as it does in a real EMU.
-  matrix.makeScale(2.7, 0.08, 2.9);
-  matrix.setPosition(0, floor - 0.08, front + 1.55);
-  builder.add(unitBox(), matrix, panel);
-  matrix.makeScale(2.7, 2.5, 0.12);
-  matrix.setPosition(0, floor, front + 3.0);
-  builder.add(unitBox(), matrix, panel);
-  matrix.makeScale(0.78, 1.95, 0.05);
-  matrix.setPosition(0.72, floor, front + 2.92);
-  builder.add(unitBox(), matrix, new Color(0.26, 0.28, 0.3));
+  const panel = new Color(0.21, 0.22, 0.24);
+  const lining = new Color(0.54, 0.53, 0.5);
+  const deskTop = new Color(0.11, 0.115, 0.13);
+  const trim = new Color(0.42, 0.44, 0.46);
+  const black = new Color(0.06, 0.065, 0.07);
 
-  // Ceiling, kept high enough to stay out of the driver's eyeline.
-  matrix.makeScale(2.8, 0.12, 3.0);
-  matrix.setPosition(0, 3.42, front + 1.55);
+  // --- shell of the cab ----------------------------------------------------
+  // Floor, ceiling and the bulkhead behind the driver, all kept inside the
+  // bodyside: anything wider than `INNER_HALF` comes out through the side of
+  // the train where the shell draws in at the nose.
+  matrix.makeScale(INNER_HALF * 2, 0.08, back - front);
+  matrix.setPosition(0, floor - 0.08, (front + back) / 2);
   builder.add(unitBox(), matrix, panel);
+  matrix.makeScale(INNER_HALF * 2 - 0.06, 0.1, back - front - 0.1);
+  matrix.setPosition(0, 3.28, (front + back) / 2);
+  builder.add(unitBox(), matrix, lining);
 
-  // Console: a low desk that reads as a dark band across the bottom of the
-  // view without eating into the windscreen.
-  matrix.makeScale(2.56, 0.1, 0.78);
-  matrix.setPosition(0, 1.94, front + 0.58);
-  builder.add(unitBox(), new Matrix4().makeRotationX(-0.16).premultiply(matrix), desk);
-  matrix.makeScale(2.56, 0.84, 0.14);
-  matrix.setPosition(0, floor, front + 0.96);
-  builder.add(unitBox(), matrix, desk);
-  matrix.makeScale(2.56, 0.9, 0.12);
-  matrix.setPosition(0, floor, front + 0.22);
+  // Bulkhead to the saloon, with the door through it on the driver's right and
+  // a small window beside the door.
+  matrix.makeScale(INNER_HALF * 2, 3.3 - floor, 0.1);
+  matrix.setPosition(0, floor, back);
   builder.add(unitBox(), matrix, panel);
+  matrix.makeScale(0.72, 1.98, 0.06);
+  matrix.setPosition(0.62, floor, back - 0.05);
+  builder.add(unitBox(), matrix, new Color(0.34, 0.36, 0.38));
+  matrix.makeScale(0.05, 1.98, 0.04);
+  matrix.setPosition(0.24, floor, back - 0.09);
+  dark.add(unitBox(), matrix, black);
+  // Notice board and a fire extinguisher against the bulkhead.
+  matrix.makeScale(0.44, 0.32, 0.03);
+  matrix.setPosition(-0.5, 2.5, back - 0.09);
+  builder.add(unitBox(), matrix, new Color(0.78, 0.77, 0.72));
+  const bottle = new Matrix4().makeScale(0.17, 0.44, 0.17);
+  bottle.setPosition(-1.05, floor, back - 0.24);
+  dark.add(unitCylinder(8), bottle, new Color(0.52, 0.1, 0.09));
 
-  // Windscreen pillars, right out at the body sides, plus the centre pillar
-  // between the two panes.
-  for (const px of [-1.34, 1.34]) {
-    matrix.makeScale(0.13, 1.28, 0.16);
-    matrix.setPosition(px, 1.98, front + 0.14);
-    builder.add(unitBox(), matrix, panel);
-  }
-  matrix.makeScale(0.14, 1.2, 0.14);
-  matrix.setPosition(0.22, 1.98, front + 0.14);
-  builder.add(unitBox(), matrix, panel);
-  // Header above the glass, and a sun visor over the driver.
-  matrix.makeScale(2.85, 0.42, 0.2);
-  matrix.setPosition(0, 3.2, front + 0.14);
-  builder.add(unitBox(), matrix, panel);
-  matrix.makeScale(1.3, 0.05, 0.3);
-  matrix.setPosition(-0.55, 3.1, front + 0.36);
-  builder.add(unitBox(), matrix, new Color(0.26, 0.25, 0.23));
-
-  // The windscreen itself: very slightly tinted, so reflections read on it.
-  matrix.makeScale(2.55, 1.16, 0.03);
-  matrix.setPosition(0, 2.04, front + 0.2);
-  glass.add(unitBox(), new Matrix4().makeRotationX(0.06).premultiply(matrix), new Color(0.6, 0.68, 0.75));
-
-  // Side walls, glazed above waist height so the cab does not feel boxed in.
+  // Side linings, stopping short of the side window so the glazing in the
+  // bodyside is what the driver looks through, not a panel behind it.
   for (const sx of [-1, 1]) {
-    matrix.makeScale(0.1, 0.86, 2.7);
-    matrix.setPosition(sx * 1.44, floor, front + 1.7);
+    matrix.makeScale(0.06, SILL - floor, back - front - 0.1);
+    matrix.setPosition(sx * (INNER_HALF - 0.03), floor, (front + back) / 2);
     builder.add(unitBox(), matrix, panel);
-    matrix.makeScale(0.1, 0.5, 2.7);
-    matrix.setPosition(sx * 1.44, 2.95, front + 1.7);
-    builder.add(unitBox(), matrix, panel);
-    // Window pillar between the door window and the rear quarter light.
-    matrix.makeScale(0.11, 1.2, 0.16);
-    matrix.setPosition(sx * 1.42, 2.0, front + 2.0);
-    builder.add(unitBox(), matrix, panel);
+    matrix.makeScale(0.06, 3.28 - HEAD, back - front - 0.1);
+    matrix.setPosition(sx * (INNER_HALF - 0.03), HEAD, (front + back) / 2);
+    builder.add(unitBox(), matrix, lining);
+    // Grab handle beside the driver's door.
+    matrix.makeScale(0.05, 0.9, 0.05);
+    matrix.setPosition(sx * (INNER_HALF - 0.1), 1.9, back - 0.4);
+    builder.add(unitBox(), matrix, trim);
   }
 
-  // Driver's seat, just behind the eye point.
-  matrix.makeScale(0.56, 0.12, 0.56);
-  matrix.setPosition(-0.42, 1.62, front + 1.62);
-  builder.add(unitBox(), matrix, new Color(0.11, 0.13, 0.16));
-  matrix.makeScale(0.56, 0.62, 0.12);
-  matrix.setPosition(-0.42, 1.74, front + 1.92);
-  builder.add(unitBox(), matrix, new Color(0.11, 0.13, 0.16));
-  matrix.makeScale(0.14, 0.48, 0.14);
-  matrix.setPosition(-0.42, floor, front + 1.62);
+  // Sun blind, rolled up against the header well clear of the screen so it
+  // shades the driver without cutting into the view of the line.
+  matrix.makeScale(1.15, 0.09, 0.16);
+  matrix.setPosition(-0.55, 3.14, front + 0.34);
+  dark.add(unitBox(), matrix, new Color(0.24, 0.23, 0.21));
+  // Cab light over the desk.
+  matrix.makeScale(0.5, 0.05, 0.3);
+  matrix.setPosition(-0.2, 3.22, front + 1.5);
+  builder.add(unitBox(), matrix, new Color(0.85, 0.84, 0.8));
+
+  // --- console -------------------------------------------------------------
+  // A desk across the front of the cab: a raked instrument panel facing the
+  // driver, a flat top to work the handles off, and a plain front down to the
+  // floor. It is kept low and shallow - a deep desk fills the bottom third of
+  // the windscreen and the driver ends up looking over a wall.
+  const deskFront = front + 0.42;
+  const deskBack = front + 1.16;
+  matrix.makeScale(INNER_HALF * 2 - 0.14, 0.07, deskBack - deskFront);
+  matrix.setPosition(0, DESK, (deskFront + deskBack) / 2);
+  builder.add(unitBox(), matrix, deskTop);
+  // The instrument panel stands at the far edge of the desk and leans back at
+  // the driver, so the dials are read over the handles and the whole board sits
+  // just under the windscreen sill instead of across the view.
+  const board = new Matrix4().makeScale(INNER_HALF * 2 - 0.14, 0.32, 0.07);
+  board.premultiply(new Matrix4().makeRotationX(0.34));
+  board.premultiply(new Matrix4().makeTranslation(0, DESK, deskFront));
+  builder.add(unitBox(), board, panel);
+  // Front of the desk, and the kick panel facing the driver under it.
+  matrix.makeScale(INNER_HALF * 2 - 0.14, DESK - floor, 0.08);
+  matrix.setPosition(0, floor, deskFront);
+  builder.add(unitBox(), matrix, panel);
+  matrix.makeScale(INNER_HALF * 2 - 0.3, DESK - floor - 0.1, 0.06);
+  matrix.setPosition(0, floor, deskBack - 0.02);
+  dark.add(unitBox(), matrix, black);
+
+  /** Puts an instrument on the raked board at height `h` above the desk. */
+  const onBoard = (x: number, h: number, w: number, tall: number, color: Color, into = dark) => {
+    const m = new Matrix4().makeScale(w, tall, 0.035);
+    m.premultiply(new Matrix4().makeRotationX(0.34));
+    m.premultiply(new Matrix4().makeTranslation(x, DESK + h, deskFront + 0.05 + h * 0.35));
+    into.add(unitBox(), m, color);
+  };
+  // Speedometer in front of the driver, the brake and main reservoir gauges
+  // beside it, and the monitor over on the other side of the board.
+  const bezel = revolved(
+    [
+      [0.0, 0.0],
+      [0.46, 0.0],
+      [0.5, 0.05],
+      [0.44, 0.09],
+      [0.0, 0.09],
+    ],
+    16,
+  );
+  for (const [gx, gs] of [[-0.6, 0.22], [-0.26, 0.13], [-0.07, 0.13]] as [number, number][]) {
+    const at = new Matrix4().makeRotationX(Math.PI / 2 + 0.34);
+    at.premultiply(new Matrix4().makeTranslation(gx, DESK + 0.15, deskFront + 0.12));
+    const rim = new Matrix4().makeScale(gs, 0.04, gs).premultiply(at);
+    builder.add(bezel, rim, trim);
+    // A turned cylinder rather than a surface of revolution closing on its
+    // axis: the fan of triangles that one ends in shades as a pinwheel, which
+    // is the last thing a dial face should look like.
+    const dial = new Matrix4().makeScale(gs * 0.84, 0.04, gs * 0.84).premultiply(at);
+    dark.add(unitCylinder(20), dial, new Color(0.11, 0.115, 0.13));
+    // A needle, so the dial reads as an instrument rather than as a hole.
+    const needle = new Matrix4().makeScale(0.016, gs * 0.36, 0.016);
+    needle.premultiply(new Matrix4().makeRotationZ(-2.1));
+    needle.premultiply(new Matrix4().makeTranslation(0, 0.045, 0));
+    needle.premultiply(at);
+    builder.add(unitBox(), needle, new Color(0.9, 0.88, 0.84));
+  }
+  bezel.dispose();
+  // Driver's monitor, and the row of ATS indicator lamps along the board.
+  onBoard(0.42, 0.09, 0.34, 0.15, new Color(0.05, 0.07, 0.09));
+  for (let i = 0; i < 5; i++) {
+    onBoard(-1.06 + i * 0.1, 0.26, 0.06, 0.04, i === 1 ? new Color(0.5, 0.16, 0.1) : trim);
+  }
+  // Switch panel on the flat of the desk, on the far side from the handles.
+  for (let i = 0; i < 4; i++) {
+    matrix.makeScale(0.07, 0.03, 0.07);
+    matrix.setPosition(0.5 + i * 0.1, DESK + 0.07, deskFront + 0.3);
+    dark.add(unitBox(), matrix, trim);
+  }
+  // Timetable holder standing on the desk, where every Japanese cab has one.
+  const holder = new Matrix4().makeScale(0.24, 0.19, 0.02);
+  holder.premultiply(new Matrix4().makeRotationX(0.34));
+  holder.premultiply(new Matrix4().makeTranslation(-1.04, DESK + 0.06, deskFront + 0.2));
+  builder.add(unitBox(), holder, new Color(0.86, 0.85, 0.8));
+
+  // --- driver's seat -------------------------------------------------------
+  // Set to the left, as it is in a Japanese cab, and low enough that the eye
+  // clears the desk with the whole screen still above it.
+  const seatX = -0.58;
+  matrix.makeScale(0.5, 0.11, 0.5);
+  matrix.setPosition(seatX, 1.6, front + 1.62);
+  builder.add(unitBox(), matrix, new Color(0.1, 0.12, 0.15));
+  const backRest = new Matrix4().makeScale(0.5, 0.66, 0.11);
+  backRest.premultiply(new Matrix4().makeRotationX(-0.12));
+  backRest.premultiply(new Matrix4().makeTranslation(seatX, 1.7, front + 1.88));
+  builder.add(unitBox(), backRest, new Color(0.1, 0.12, 0.15));
+  const pedestal = new Matrix4().makeScale(0.13, 0.45, 0.13);
+  pedestal.setPosition(seatX, floor, front + 1.62);
+  builder.add(unitCylinder(8), pedestal, trim);
+  matrix.makeScale(0.42, 0.05, 0.34);
+  matrix.setPosition(seatX, floor, front + 1.62);
   builder.add(unitBox(), matrix, trim);
 
-  // Instrument bezels on the desk; the readouts themselves live in the HUD.
-  for (const gx of [-0.2, 0.36]) {
-    matrix.makeScale(0.36, 0.04, 0.36);
-    matrix.setPosition(gx, 1.98, front + 0.52);
-    builder.add(unitBox(), new Matrix4().makeRotationX(-0.16).premultiply(matrix), trim);
-  }
-
   const mesh = builder.toMesh(
-    new MeshStandardMaterial({ vertexColors: true, roughness: 0.74, metalness: 0.18 }),
+    new MeshStandardMaterial({ vertexColors: true, roughness: 0.74, metalness: 0.14 }),
     false,
     'cab-interior',
   );
@@ -1127,79 +1468,82 @@ export function createCab(carLength: number): CabModel {
     mesh.userData.ownsMaterial = true;
     group.add(mesh);
   }
-
-  const glassMesh = glass.toMesh(
-    new MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.04,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.07,
-      depthWrite: false,
-    }),
+  const darkMesh = dark.toMesh(
+    new MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.02 }),
     false,
-    'cab-glass',
+    'cab-fittings',
   );
-  if (glassMesh) {
-    glassMesh.userData.ownsMaterial = true;
-    group.add(glassMesh);
+  if (darkMesh) {
+    darkMesh.userData.ownsMaterial = true;
+    group.add(darkMesh);
   }
 
-  // Master controller: a short lever on the left of the desk.
-  const masterHandle = new Group();
-  const masterBuilder = new MeshBuilder();
-  masterBuilder.add(
-    unitBox(),
-    new Matrix4().makeScale(0.07, 0.3, 0.07),
-    new Color(0.24, 0.25, 0.27),
-  );
-  const knob = new Matrix4().makeScale(0.13, 0.08, 0.2);
-  knob.setPosition(0, 0.3, 0);
-  masterBuilder.add(unitBox(), knob, new Color(0.55, 0.14, 0.11));
-  const masterMesh = masterBuilder.toMesh(
-    new MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0.4 }),
-    false,
-    'master-handle',
-  );
-  if (masterMesh) {
-    masterMesh.userData.ownsMaterial = true;
-    masterHandle.add(masterMesh);
-  }
-  masterHandle.position.set(-0.9, 1.94, front + 0.46);
+  // --- handles -------------------------------------------------------------
+  // Two handle desk: the master controller under the driver's left hand and the
+  // brake handle to the right of it, both on the flat of the desk in front of
+  // the seat rather than spread across the whole width of the cab.
+  const handle = (
+    stem: number,
+    knobLength: number,
+    knobColor: Color,
+    name: string,
+  ): Group => {
+    const pivot = new Group();
+    const b = new MeshBuilder();
+    b.add(unitBox(), new Matrix4().makeScale(0.06, stem, 0.06), new Color(0.22, 0.23, 0.25));
+    const knob = new Matrix4().makeScale(0.1, 0.075, knobLength);
+    knob.setPosition(0, stem, knobLength * 0.24);
+    b.add(unitBox(), knob, knobColor);
+    const m = b.toMesh(
+      new MeshStandardMaterial({ vertexColors: true, roughness: 0.46, metalness: 0.42 }),
+      false,
+      name,
+    );
+    if (m) {
+      m.userData.ownsMaterial = true;
+      pivot.add(m);
+    }
+    return pivot;
+  };
+  const masterHandle = handle(0.24, 0.17, new Color(0.5, 0.13, 0.1), 'master-handle');
+  masterHandle.position.set(-1.0, DESK + 0.06, deskBack - 0.28);
   group.add(masterHandle);
-
-  // Brake handle on the right.
-  const brakeHandle = new Group();
-  const brakeBuilder = new MeshBuilder();
-  brakeBuilder.add(
-    unitBox(),
-    new Matrix4().makeScale(0.065, 0.28, 0.065),
-    new Color(0.24, 0.25, 0.27),
-  );
-  const brakeKnob = new Matrix4().makeScale(0.12, 0.08, 0.18);
-  brakeKnob.setPosition(0, 0.28, 0);
-  brakeBuilder.add(unitBox(), brakeKnob, new Color(0.16, 0.18, 0.22));
-  const brakeMesh = brakeBuilder.toMesh(
-    new MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0.4 }),
-    false,
-    'brake-handle',
-  );
-  if (brakeMesh) {
-    brakeMesh.userData.ownsMaterial = true;
-    brakeHandle.add(brakeMesh);
-  }
-  brakeHandle.position.set(0.62, 1.94, front + 0.46);
+  const brakeHandle = handle(0.22, 0.15, new Color(0.15, 0.17, 0.2), 'brake-handle');
+  brakeHandle.position.set(-0.2, DESK + 0.06, deskBack - 0.28);
   group.add(brakeHandle);
+  // Their quadrant plates, so the handles are seen to move against something.
+  const quadrant = new MeshBuilder();
+  for (const qx of [-1.0, -0.2]) {
+    // Quadrant plate beside each handle, and the boss it turns in, so the
+    // handles are seen to be mounted on the desk rather than laid on it.
+    const q = new Matrix4().makeScale(0.03, 0.08, 0.26);
+    q.setPosition(qx + 0.09, DESK + 0.05, deskBack - 0.26);
+    quadrant.add(unitBox(), q, new Color(0.2, 0.21, 0.23));
+    const boss = new Matrix4().makeScale(0.16, 0.05, 0.16);
+    boss.setPosition(qx, DESK + 0.04, deskBack - 0.28);
+    quadrant.add(unitCylinder(10), boss, new Color(0.24, 0.25, 0.27));
+  }
+  const quadrantMesh = quadrant.toMesh(
+    new MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0.3 }),
+    false,
+    'cab-quadrants',
+  );
+  if (quadrantMesh) {
+    quadrantMesh.userData.ownsMaterial = true;
+    group.add(quadrantMesh);
+  }
 
-  // Windscreen wiper, parked along the bottom of the glass where it belongs -
-  // stood up across the screen it reads as a girder through the view.
+  // --- wiper ---------------------------------------------------------------
+  // The blade the driver watches is the one on the outside of the screen, so it
+  // is hung on the mask rather than inside the cab, parked along the bottom of
+  // the driver's pane.
   const wiper = new Group();
   const wiperBuilder = new MeshBuilder();
-  const blade = new Matrix4().makeScale(0.026, 1.05, 0.026);
-  blade.setPosition(0, 0.5, 0);
+  const blade = new Matrix4().makeScale(0.02, 0.84, 0.02);
+  blade.setPosition(0, 0.42, 0);
   wiperBuilder.add(unitBox(), blade, new Color(0.09, 0.09, 0.1));
-  const wiperArm = new Matrix4().makeScale(0.04, 0.34, 0.04);
-  wiperArm.setPosition(0, 0.17, -0.03);
+  const wiperArm = new Matrix4().makeScale(0.032, 0.3, 0.032);
+  wiperArm.setPosition(0, 0.12, -0.02);
   wiperBuilder.add(unitBox(), wiperArm, new Color(0.14, 0.14, 0.15));
   const wiperMesh = wiperBuilder.toMesh(
     new MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }),
@@ -1210,7 +1554,8 @@ export function createCab(carLength: number): CabModel {
     wiperMesh.userData.ownsMaterial = true;
     wiper.add(wiperMesh);
   }
-  wiper.position.set(-0.62, 1.74, front + 0.16);
+  wiper.position.copy(facePoint(-1.05, SCREEN_SILL + 0.04, front));
+  wiper.position.z -= 0.06;
   wiper.rotation.z = WIPER_PARK;
   group.add(wiper);
 
@@ -1219,6 +1564,8 @@ export function createCab(carLength: number): CabModel {
     masterHandle,
     brakeHandle,
     wiper,
-    eyePosition: new Vector3(-0.45, 2.38, front + 1.05),
+    // Seated eye: on the driver's side, high enough to clear the desk, and far
+    // enough back that the screen pillars stay out at the edge of vision.
+    eyePosition: new Vector3(-0.55, 2.46, front + 1.6),
   };
 }

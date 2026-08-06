@@ -28,6 +28,8 @@ const KEYS: [string, string][] = [
   ['Enter', 'key.horn1'],
   ['Shift + Enter', 'key.horn2'],
   ['C', 'key.camera'],
+  ['← / →', 'key.pan'],
+  ['R', 'key.recentre'],
   ['F', 'key.auto'],
   ['B', 'key.nextBiome'],
   ['U', 'key.hideUi'],
@@ -38,6 +40,7 @@ const KEYS: [string, string][] = [
   ['P / Esc', 'key.pause'],
   ['F3', 'key.debug'],
   ['Mouse', 'key.look'],
+  ['Right drag', 'key.panMouse'],
 ];
 
 export class Menu {

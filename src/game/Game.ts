@@ -276,7 +276,7 @@ export class Game {
   // --- simulation ----------------------------------------------------------
 
   private update(dt: number): void {
-    this.handleInput();
+    this.handleInput(dt);
     if (!this.running) return;
 
     this.elapsed += dt;
@@ -351,7 +351,7 @@ export class Game {
     });
   }
 
-  private handleInput(): void {
+  private handleInput(dt: number): void {
     const input = this.input;
 
     if (input.wasPressed('KeyP') || input.wasPressed('Escape')) {
@@ -414,6 +414,14 @@ export class Game {
       else this.camera.cycle();
       this.hud.showMessage(t(CAMERA_LABELS[this.camera.mode]), 1.2);
     }
+    // Sliding the view sideways: the left and right arrows, or a drag with the
+    // right mouse button. In the cab that is the driver leaning across to see
+    // past a pillar; R puts the head back where it started.
+    let pan = input.panX;
+    if (input.isDown('ArrowLeft')) pan -= 1.4 * dt;
+    if (input.isDown('ArrowRight')) pan += 1.4 * dt;
+    if (pan !== 0) this.camera.pan(pan);
+    if (input.wasPressed('KeyR')) this.camera.recentre();
     if (input.wasPressed('KeyF')) {
       this.auto.enabled = !this.auto.enabled;
       this.hud.showMessage(t(this.auto.enabled ? 'msg.autoOn' : 'msg.autoOff'), 1.8);
