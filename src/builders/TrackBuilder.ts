@@ -59,13 +59,19 @@ export function buildFormation(ctx: ChunkContext): void {
 
   const cols = CORRIDOR_COLUMNS.length;
   const count = rows.length * cols;
-  const positions = new Float32Array(count * 3);
-  const normals = new Float32Array(count * 3);
-  const uvs = new Float32Array(count * 2);
-  const colors = new Float32Array(count * 3);
-  const slopes = new Float32Array(count);
-  const shores = new Float32Array(count);
-  const cavities = new Float32Array(count);
+  // Plus a skirt down each long edge. The corridor is a strip in track space
+  // laid over tiles that are a grid in world space, and on a hillside the two
+  // do not arrive at the same height at the edge where they meet - so without
+  // this there is a slot open along both sides of the line, and through it you
+  // see nothing at all.
+  const total = count + rows.length * 2;
+  const positions = new Float32Array(total * 3);
+  const normals = new Float32Array(total * 3);
+  const uvs = new Float32Array(total * 2);
+  const colors = new Float32Array(total * 3);
+  const slopes = new Float32Array(total);
+  const shores = new Float32Array(total);
+  const cavities = new Float32Array(total);
   const heights = new Float32Array(count);
 
   const p = new Vector3();
@@ -150,6 +156,50 @@ export function buildFormation(ctx: ChunkContext): void {
       const i3 = i2 + 1;
       indices.push(i0, i2, i1, i1, i2, i3);
     }
+  }
+
+  // The skirt: the two edge columns copied and dropped by however far the
+  // ground moves across the last span of the strip, which is nothing where the
+  // line runs over a plain and metres where it runs along a hillside.
+  const skirt = (r: number, edge: 0 | 1): number => {
+    const c = edge === 0 ? 0 : cols - 1;
+    const src = r * cols + c;
+    const inner = r * cols + (edge === 0 ? 1 : cols - 2);
+    const along =
+      Math.abs(heights[Math.min(rows.length - 1, r + 1) * cols + c] - heights[Math.max(0, r - 1) * cols + c]);
+    const across = Math.abs(heights[src] - heights[inner]);
+    const drop = Math.min(24, 1.5 + Math.max(across, along) * 1.3);
+    const v = count + r * 2 + edge;
+    positions[v * 3] = positions[src * 3];
+    positions[v * 3 + 1] = positions[src * 3 + 1] - drop;
+    positions[v * 3 + 2] = positions[src * 3 + 2];
+    normals[v * 3] = normals[src * 3];
+    normals[v * 3 + 1] = normals[src * 3 + 1];
+    normals[v * 3 + 2] = normals[src * 3 + 2];
+    uvs[v * 2] = uvs[src * 2];
+    uvs[v * 2 + 1] = uvs[src * 2 + 1];
+    colors[v * 3] = colors[src * 3];
+    colors[v * 3 + 1] = colors[src * 3 + 1];
+    colors[v * 3 + 2] = colors[src * 3 + 2];
+    slopes[v] = slopes[src];
+    shores[v] = shores[src];
+    cavities[v] = cavities[src];
+    return v;
+  };
+  for (let r = 0; r < rows.length - 1; r++) {
+    const a = r * cols;
+    const b = (r + 1) * cols;
+    const sa = skirt(r, 0);
+    const sb = skirt(r + 1, 0);
+    const c = r * cols + cols - 1;
+    const d = (r + 1) * cols + cols - 1;
+    const sc = skirt(r, 1);
+    const sd = skirt(r + 1, 1);
+    // Both windings. The material is single sided and which way round these
+    // face depends on which way the line is heading; a skirt is never looked
+    // at directly, so it costs two triangles a row to stop caring.
+    indices.push(a, sa, b, b, sa, sb, a, b, sa, b, sb, sa);
+    indices.push(c, d, sc, d, sd, sc, c, sc, d, d, sc, sd);
   }
 
   const geometry = new BufferGeometry();

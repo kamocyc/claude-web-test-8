@@ -45,15 +45,30 @@ const LEVELS: TileLevel[] = [
 ];
 
 /**
+ * How far each ring is sunk below the one inside it, metres per level.
+ *
+ * Rings lap over each other by a cell, and over that cell the coarse surface is
+ * as likely to be above the fine one as below - and where it is above, a single
+ * hundred-and-twenty-metre facet lies across the hillside in place of the
+ * detailed ground, shaded by its own coarse normal. Sinking each level a little
+ * settles it: the finer surface always wins the lap, and the step this leaves
+ * where the ring ends is inside what the skirt already covers.
+ */
+const LEVEL_SINK = 0.35;
+
+/**
  * The rectangle a tile must leave out because a finer ring already covers it.
  *
  * Without this every ring is a solid block, so each level overlaps the one
  * inside it by up to half a tile. Two meshes of different resolution sampling
  * the same ground do not agree between their vertices, and the coarse one
  * comes through the fine one as flat facets and z-fighting - which is most of
- * what makes a generated middle distance look wrong. Each ring is therefore
- * punched hollow, overlapping the block inside it by exactly one of its own
- * cells: enough to close the seam, not enough to fight.
+ * what makes a generated middle distance look wrong, and on a steep hillside,
+ * where the two disagree by tens of metres, it is a scatter of dark slabs
+ * lying across the slope. Each ring is therefore punched hollow at exactly the
+ * block inside it. A cell can only be dropped whole, so the ring still laps a
+ * cell or so over the block - which is what leaves no gap - and `LEVEL_SINK`
+ * makes sure the finer surface wins wherever they do lap.
  */
 interface Hole {
   minX: number;
@@ -117,8 +132,7 @@ export class TerrainTiles {
     let innerMaxZ = -Infinity;
 
     for (let level = 0; level < this.levelCount; level++) {
-      const { size, segments, radius } = LEVELS[level];
-      const cell = size / segments;
+      const { size, radius } = LEVELS[level];
       const cx = Math.floor(cameraX / size);
       const cz = Math.floor(cameraZ / size);
       let minX = Infinity;
@@ -126,16 +140,12 @@ export class TerrainTiles {
       let minZ = Infinity;
       let maxZ = -Infinity;
 
-      // What this ring must leave out: the block inside it, pulled in by one
-      // of this level's own cells so the two rings still overlap by a cell.
+      // What this ring must leave out: exactly the block inside it. Cells are
+      // dropped whole, so the ones that straddle the edge stay and the ring
+      // still laps over the block by up to one cell - no more than it has to.
       const hole: Hole | null =
         level > 0 && Number.isFinite(innerMinX)
-          ? {
-              minX: innerMinX + cell,
-              maxX: innerMaxX - cell,
-              minZ: innerMinZ + cell,
-              maxZ: innerMaxZ - cell,
-            }
+          ? { minX: innerMinX, maxX: innerMaxX, minZ: innerMinZ, maxZ: innerMaxZ }
           : null;
 
       for (let dz = -radius; dz <= radius; dz++) {
@@ -286,7 +296,7 @@ export class TerrainTiles {
         }
         const proj = this.field.project(x, z, this.projection.hint, this.projection, window);
         const sample = this.field.sampleFor(proj);
-        const y = this.field.ground(sample, proj.lateral, x, z, true);
+        const y = this.field.ground(sample, proj.lateral, x, z, true) - level * LEVEL_SINK;
         lastHeight = y;
         heights[idx] = y;
         shore[idx] = this.field.shoreFactor(sample, proj.lateral, y);
@@ -375,12 +385,22 @@ export class TerrainTiles {
     }
 
     // Skirt: duplicate the border ring, dropped far enough to cover the height
-    // a coarser neighbour can miss over one of its cells - and no further. A
-    // deep skirt hangs out of every hillside as a dark flap.
-    const drop = step * 0.45 + 0.8;
+    // a neighbour of a different resolution can miss - and no further.
+    //
+    // A fixed depth scaled to the cell is that depth everywhere, so on a level
+    // where a cell is a hundred metres across it is a sixty-metre curtain, and
+    // wherever the ground falls away it hangs clear of the hillside as a dark
+    // flap. What it actually has to cover is how much the ground moves over
+    // one cell *here*, which on the flat is nothing and on a mountainside is
+    // metres - so that is what it is measured from.
     let sv = gridVerts;
     const addSkirt = (i: number, j: number): number => {
       const src = j * (segments + 1) + i;
+      const relief = Math.max(
+        Math.abs(at(i + 1, j) - at(i - 1, j)),
+        Math.abs(at(i, j + 1) - at(i, j - 1)),
+      );
+      const drop = Math.min(16, 1.2 + LEVEL_SINK * level + relief * 1.3);
       const v = sv++;
       positions[v * 3] = positions[src * 3];
       positions[v * 3 + 1] = positions[src * 3 + 1] - drop;

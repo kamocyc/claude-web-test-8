@@ -28,7 +28,7 @@ import { blendedAttr, BIOME_INDEX, dominantBiome } from '../world/Biome';
 import { groundMatrix } from '../world/TrackFrame';
 import { canalLevel, canalCentre, canalWidth } from '../world/TerrainField';
 import { riverAxis, riverHalfAt, riverLevelAt, riverPoint } from '../world/River';
-import { onRoad, roadAt, waterProximity } from '../world/Sites';
+import { inWater, onRoad, roadAt } from '../world/Sites';
 import { createWaterMaterial } from '../materials/WaterMaterial';
 import { textures } from '../materials/TextureFactory';
 import { clamp01, lerp } from '../core/MathUtils';
@@ -153,8 +153,8 @@ export function buildVegetation(ctx: ChunkContext): void {
     if (p.sample.structure !== 0 && Math.abs(lateral) < 30) continue;
     if (p.sample.stationZone > 0.35 && Math.abs(lateral) < 55) continue;
     if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 2.5)) continue;
-    if (waterProximity(ctx.field, p.sample, lateral, p.x, p.z, 6) > 0.4) continue;
-    if (!ctx.sites.free(p.x, p.z, 2.5)) continue;
+    if (inWater(ctx.field, p.sample, lateral, p.x, p.z, 1.5, p.y)) continue;
+    if (!ctx.sites.free(p.x, p.z, 2.5, 2.5)) continue;
 
     const density = blendedAttr(p.sample.weights, 'treeDensity');
     // Woodland grows in stands with open ground between them, not as an even
@@ -209,7 +209,7 @@ export function buildVegetation(ctx: ChunkContext): void {
     if (p.sample.structure !== 0 && Math.abs(lateral) < 30) continue;
     if (p.sample.stationZone > 0.35 && Math.abs(lateral) < 55) continue;
     if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 1.5)) continue;
-    if (!ctx.sites.free(p.x, p.z, 1.5)) continue;
+    if (!ctx.sites.free(p.x, p.z, 1.5, 1.5)) continue;
     const patch = clamp01(ctx.field.noise.scatter.fbm(p.x * 0.0035, p.z * 0.0035, 3) * 0.5 + 0.5);
     const shrubs = blendedAttr(p.sample.weights, 'shrubDensity');
     if (!ctx.rng.chance(clamp01(shrubs * (0.2 + patch * 0.9)) * 0.7)) continue;
@@ -256,7 +256,7 @@ export function buildGroundCover(ctx: ChunkContext): void {
     if (!p || p.y < 0.4) continue;
     if (p.sample.structure !== 0) continue;
     if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 0.5)) continue;
-    if (!ctx.sites.free(p.x, p.z, 0.6)) continue;
+    if (!ctx.sites.free(p.x, p.z, 0.6, 0.6)) continue;
     const shrub = blendedAttr(p.sample.weights, 'shrubDensity');
     // Weeds grow thickest right at the edge of the ballast, where nothing
     // walks on them and the drainage is good.
@@ -331,19 +331,26 @@ export function buildBuildings(ctx: ChunkContext): void {
     const cluster = ctx.field.noise.scatter.fbm(p.x * 0.0022 + 40, p.z * 0.0022, 3) * 0.5 + 0.5;
     if (!ctx.rng.chance(clamp01(density * (0.25 + cluster * 1.15)) * 0.8)) continue;
 
-    // Nothing is built in the carriageway, in the river or on the flood side of
-    // its levee.
-    if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 3)) continue;
-    if (waterProximity(ctx.field, p.sample, lateral, p.x, p.z, 22) > 0.25) continue;
-
     const biomeId = dominantBiome(p.sample.weights);
     const kind = pickBuildingKind(ctx, biomeId, density, cluster);
     const plan = planBuilding(ctx, kind);
     const site = KIND_SITE[kind];
 
     const yaw = gridAngle + (ctx.rng.chance(0.5) ? 0 : Math.PI / 2) + ctx.rng.range(-0.06, 0.06);
-    const radius = Math.hypot(plan.w, plan.d) * 0.5 + site.plot;
-    if (!ctx.sites.free(p.x, p.z, radius)) continue;
+    // The plot, not the point. Every one of these tests used to be made against
+    // the centre of the building, which let a twenty-two metre block stand ten
+    // metres off the road centre with the carriageway running through its
+    // ground floor, and put houses a metre outside a river bank half in the
+    // water.
+    const hx = plan.w * 0.5 + site.plot;
+    const hz = plan.d * 0.5 + site.plot;
+    const reach = Math.max(hx, hz);
+
+    // Nothing is built in the carriageway, in the river or on the flood side of
+    // its levee.
+    if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, reach, 3)) continue;
+    if (inWater(ctx.field, p.sample, lateral, p.x, p.z, reach, p.y)) continue;
+    if (!ctx.sites.free(p.x, p.z, hx, hz, yaw)) continue;
 
     // Ground is not level, and a box dropped on the average of it floats at one
     // corner and is buried at the other. Read the plot, refuse anything too
@@ -352,7 +359,7 @@ export function buildBuildings(ctx: ChunkContext): void {
     // slope anyway.
     const { low, high } = footprint(ctx, p, plan.w * 0.5, plan.d * 0.5, yaw);
     if (high - low > site.fall) continue;
-    ctx.sites.claim(p.x, p.z, radius);
+    ctx.sites.claim(p.x, p.z, hx, hz, yaw);
 
     const baseY = high + 0.1;
     const plinth = baseY - (low - 0.6);
@@ -591,7 +598,7 @@ export function buildRoads(ctx: ChunkContext): void {
     const cz = sample.z + rz * road.centre;
     // A road has to get over the water like anything else, and it has no
     // bridge - so it stops at the bank and starts again on the other side.
-    if (waterProximity(ctx.field, sample, road.centre, cx, cz, road.half + 8) > 0.15) {
+    if (inWater(ctx.field, sample, road.centre, cx, cz, road.half + 4)) {
       flush();
       previousPole = null;
       continue;
@@ -608,7 +615,7 @@ export function buildRoads(ctx: ChunkContext): void {
     rows.push(row);
     uvV.push(sample.s * 0.09);
     // The carriageway is somebody's ground: nothing else gets to stand on it.
-    ctx.sites.claim(cx, cz, road.half + 1.5);
+    ctx.sites.claim(cx, cz, road.half + 1.5, 2.5, alignedYaw(sample.heading));
 
     if (sample.s >= nextPoleS) {
       // Step past whatever the last break in the road skipped, or the first
@@ -700,34 +707,41 @@ export function buildFields(ctx: ChunkContext): void {
   const fieldWidth = 17;
   const season = ctx.field.noise.patches.sample(ctx.sStart * 0.0004, 3.3) * 0.5 + 0.5;
 
+  // Chunks are built independently and cannot see each other's claims, so a
+  // field that overhangs the join is a field something else can be built in.
+  // Both ends of the block are held back far enough for the whole pan to fit.
+  const halfW = fieldWidth * 0.5;
+  const halfL = fieldLength * 0.5;
   for (let sIdx = 0; ; sIdx++) {
-    const s0 = ctx.sStart + sIdx * fieldLength;
-    if (s0 + fieldLength >= ctx.sEnd) break;
+    const s0 = ctx.sStart + 4 + sIdx * fieldLength;
+    if (s0 + fieldLength >= ctx.sEnd - 4) break;
     for (let side = -1; side <= 1; side += 2) {
       for (let lane = 0; lane < 9; lane++) {
         const lat = side * (24 + lane * fieldWidth);
-        const centreS = s0 + fieldLength * 0.5;
+        const centreS = s0 + halfL;
         const p = place(ctx, centreS, lat);
         if (!p) continue;
         if (p.y < 1.0) continue;
         if (p.sample.structure !== 0) continue;
-        if (onRoad(roadAt(p.sample, ctx.field.noise), lat, 2)) continue;
-        if (waterProximity(ctx.field, p.sample, lat, p.x, p.z, 14) > 0.15) continue;
+        // A pan is seventeen metres across, so testing its centre against the
+        // road and the river let a field cover both.
+        if (onRoad(roadAt(p.sample, ctx.field.noise), lat, halfW, 2)) continue;
+        if (inWater(ctx.field, p.sample, lat, p.x, p.z, halfL, p.y)) continue;
         const weight = blendedAttr(p.sample.weights, 'paddy');
         if (!ctx.rng.chance(clamp01(weight * 1.05))) continue;
-        // Small enough that two fields on neighbouring lanes do not exclude
-        // each other, large enough to keep a house out of the crop.
-        const radius = 7.5;
-        if (!ctx.sites.free(p.x, p.z, radius)) continue;
         const yaw = alignedYaw(p.sample.heading);
+        // Pans are laid edge to edge on a grid, so the true rectangle is the
+        // only footprint that lets them sit next to each other and still keeps
+        // a farmhouse out of the crop.
+        if (!ctx.sites.free(p.x, p.z, halfW - 0.5, halfL - 0.5, yaw)) continue;
 
         // A paddy is a level pan held by a bund, and a bund is ankle high. Cut
         // one only where the ground is already close to level: on anything
         // steeper the pan has to stand proud at one end, and a rice field on a
         // plinth is a swimming pool.
-        const { low, high } = footprint(ctx, p, fieldWidth * 0.5, fieldLength * 0.5, yaw);
+        const { low, high } = footprint(ctx, p, halfW, halfL, yaw);
         if (high - low > 0.5) continue;
-        ctx.sites.claim(p.x, p.z, radius);
+        ctx.sites.claim(p.x, p.z, halfW - 0.5, halfL - 0.5, yaw);
 
         const level = high - 0.06;
         const isFlooded = ctx.rng.chance(clamp01(0.55 - season * 0.5) + 0.2);
@@ -1020,7 +1034,7 @@ export function buildLinesideDetail(ctx: ChunkContext): void {
     if (!p) continue;
     if (p.sample.structure !== 0 && Math.abs(lateral) < 26) continue;
     if (onRoad(roadAt(p.sample, ctx.field.noise), lateral, 1)) continue;
-    if (!ctx.sites.free(p.x, p.z, 2)) continue;
+    if (!ctx.sites.free(p.x, p.z, 2, 2)) continue;
     const rocky =
       p.sample.weights[BIOME_INDEX.mountain] * 1.2 + p.sample.weights[BIOME_INDEX.coast] * 0.9;
     if (!ctx.rng.chance(clamp01(rocky * 0.5))) continue;
