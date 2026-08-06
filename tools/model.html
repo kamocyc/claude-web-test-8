@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Model turntable</title>
+    <style>
+      html, body { margin: 0; background: #20262c; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Turntable for the hand-built models.
+
+      The game itself takes half a minute to settle before a chunk is worth
+      photographing, which is far too slow a loop for judging whether a bogie
+      or a crossing reads correctly. This page stages one model at a time
+      against a neutral background and lets `tools/modelshot.mjs` step the
+      camera round it, so a change to the geometry can be looked at in a second
+      or two. It is a development tool and is not part of the built game.
+    -->
+    <script type="module" src="./model.ts"></script>
+  </body>
+</html>

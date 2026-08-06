@@ -104,7 +104,7 @@ export class SeaSurface {
       const z = this.positions[i * 3 + 2] + sz;
       const proj = this.field.project(x, z, hint);
       hint = proj.hint;
-      const sample = this.field.sampleAt(proj.s);
+      const sample = this.field.sampleFor(proj);
       const y = this.field.ground(sample, proj.lateral, x, z);
 
       // The open sea is not "everywhere below zero": it is the water on the

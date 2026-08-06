@@ -108,7 +108,39 @@ something laid on top of it.
 Terrain is drawn as concentric rings of tiles (`TerrainTiles.ts`), 4 m grid
 close in and coarsening by powers of two out to the fog limit, with a downward
 skirt hiding the LOD seams — plus a fine track-space strip that resolves the
-earthworks the tiles cannot.
+earthworks the tiles cannot. Each ring is punched hollow where the ring inside
+it already covers the ground, overlapping it by exactly one of its own cells:
+two meshes of different resolution do not agree between their vertices, so a
+solid ring shows through the one inside it as flat facets and z-fighting.
+
+Track space, though, only exists where there is track. Every query carries how
+far it fell past the end of the generated route, and everything the railway did
+to the ground — the formation, a station forecourt, the lineside drain, the
+hillside a tunnel is bored through — fades out with it, so the horizon is never
+shaped by whatever happened to be at the last sleeper. The route itself is
+integrated out to the fog limit rather than to the last chunk, which is much
+cheaper than it sounds and is what gives the distance real biomes to be.
+
+**Rivers** (`River.ts`) are the one part of the landscape that is not the
+railway's, so they are not described in the railway's coordinates. A crossing
+is resolved once into a world-space axis — a point, a downstream direction, a
+surface level and a fall — and the valley, the braided gravel bed and the water
+drawn on it are all functions of world position after that. The bed is combined
+with the natural ground by taking the lower of the two, never by replacing it,
+so a river cuts a gorge through the mountains and a shallow trench across a
+plain and can never raise a wall of its own across a hillside.
+
+**Anything standing on the ground** — a house, a tree, a rice field, a fence —
+is placed in a world-aligned frame at the height the terrain actually reports,
+never in the track frame. The track frame is rolled by the cant and tilted by
+the gradient; an offset of a couple of hundred metres along its right axis
+lands tens of metres above or below the ground, which is enough to hang a whole
+neighbourhood in the air over a canted curve. Buildings read the ground at the
+four corners of their own footprint, refuse a plot too steep to build on, stand
+on the high corner and carry the fall on a concrete stem wall. Land is claimed
+before it is built on (`Sites.ts`), and the road, the water and the fields are
+functions every builder asks before it places anything — which is what keeps
+houses out of the carriageway and out of the river.
 
 **Tunnels** are the one thing a height field cannot express: ground that arches
 over the line. So it does not try. The hillside a tunnel is driven through
@@ -119,6 +151,26 @@ from exactly the width of the approach cutting at the portal to what the bore
 needs a few metres in. `buildTunnels` then caps that slot with a piece of
 hillside cut to the same heights, so it seals without a seam, and the portal
 head wall is the face of that cap with the arch punched through it.
+
+**Stations** (`StationBuilder.ts`) are built to the Japanese standards rather
+than to a silhouette: a 1,100 mm platform with a precast coped edge and the
+yellow warning blocks — dots for the drop, ribs on the safe side — set 400 mm
+back from it, a steel canopy on a single row of columns with the roof
+cantilevered both ways and drained to a gutter at the back, name boards facing
+the arriving train, a hanging board and an amber departure indicator under the
+canopy, benches turned across the platform, a drinks machine, a bin and a
+timetable frame. A station building with a deep-eaved hipped roof fronts the
+forecourt, a covered walkway and a flight of steps link it to the platform, and
+where the route calls for one a glazed footbridge crosses the line.
+
+**Level crossings** are the Japanese arrangement: on each approach, on the
+left of the carriageway as a driver meets it, one striped mast carries the
+crossbuck, two red lamps that flash alternately, the direction indicator, the
+bell and the machine whose arm swings down across the road — which puts the two
+masts diagonally opposite each other. The arm lies along the line and lifts
+about the track's lateral axis, so it blocks the road rather than the railway;
+between the rails the road is carried on panels with the flangeway left open
+beside each one.
 
 **Chunks** (`src/world/Chunk.ts`) cover 250 m of line each and carry the
 permanent way, overhead line, signalling, stations, structures and scenery.
@@ -161,6 +213,27 @@ The consist is placed from its bogie centres, which is what makes a rake swing
 properly through a curve. The cab is modelled around the driver's eye, and
 trains you meet on the opposite road are real trains, not a sound effect.
 
+**The stock** (`TrainModel.ts`) is a modern JR commuter EMU worked out from its
+own dimensions: 20 m over the couplers, a 2,950 mm laser-welded stainless
+shell with the beading rolled along it, four 1,320 mm sliding doors a side, a
+single air conditioner on the roof and a single-arm pantograph on alternate
+cars. Everything is measured from the rail head, which is the datum the track
+and the platforms use as well, so the door threshold lands level with a
+1,100 mm platform and the pantograph shoe reaches exactly the height the
+contact wire is strung at — neither is tuned against the other.
+
+The shell is swept in two strips, below the windows and above them, which
+leaves the window band genuinely open rather than papered over with dark
+panels: doors, glazing and pillars fill it, you can see the saloon through the
+glass, and the lighting reads through it after dark. Underneath, a bolsterless
+bogie carries coned wheels with real flanges, disc brakes, coil primary
+suspension and an air spring a side; the traction equipment hangs on one side
+of the underframe and the auxiliaries and reservoirs on the other. The cab
+front is a moulded mask with a two-piece raked windscreen, an emergency
+gangway door offset to the driver's right, lamp clusters low in each corner and
+a skirt over the coupler — and the windscreen is a genuine aperture through it,
+because the driver has to see out.
+
 ## Sound
 
 Everything is synthesised in the Web Audio graph (`src/audio/AudioEngine.ts`):
@@ -186,7 +259,7 @@ src/
   game/       game loop, journey and scoring, cameras
   ui/         cab display, dials, menus
   audio/      synthesised sound
-tools/        headless screenshot capture and smoke test
+tools/        headless screenshot capture, smoke test and landscape audits
 ```
 
 ## Notes
@@ -194,3 +267,23 @@ tools/        headless screenshot capture and smoke test
 Quality auto-detects and can be changed on the title screen; the renderer also
 scales its drawing buffer to hold frame rate without popping scene detail.
 Requires WebGL 2.
+
+`tools/groundcheck.mjs` audits the landscape rather than a picture of it: it
+takes the world position of everything a chunk built, asks the terrain how high
+the ground is there, and reports the distribution of the error. A tree fifteen
+metres in the air is only obvious from the right angle, so this is the check
+that does not depend on catching it in a screenshot.
+`tools/rivershot.mjs` photographs the first river crossing on a route, which is
+where the terrain, the bridge and the water surface all have to agree at once.
+
+`tools/model.html` is a turntable: it stages one hand-built model at a time — a
+car, a station, a level crossing, a street — against a neutral background, and
+`tools/modelshot.mjs` steps a camera round it and writes a frame per view. The
+game itself takes half a minute to settle before a chunk is worth photographing,
+which is far too slow a loop for judging whether a bogie reads as a bogie, so
+this exists to shorten it to a second or two:
+
+```bash
+npm run dev
+node tools/modelshot.mjs cab-car     # also: car, station, crossing, buildings
+```

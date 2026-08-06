@@ -32,7 +32,9 @@ await page.waitForTimeout(4000);
 // Find the first tunnel on the route.
 const tunnel = await page.evaluate(() => {
   const track = window.game.world.track;
-  for (let s = 600; s < 60000; s += 400) {
+  // Tunnels only happen in the hills, and a route can run a long way before it
+  // reaches any: scanning sixty kilometres finds nothing on plenty of seeds.
+  for (let s = 600; s < 250000; s += 400) {
     track.extendTo(s + 1500);
     if (track.tunnels.length) break;
   }

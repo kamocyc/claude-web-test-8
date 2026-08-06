@@ -175,8 +175,13 @@ export class Consist {
 
   dispose(): void {
     this.group.traverse((obj) => {
-      const mesh = obj as { geometry?: { dispose(): void }; userData: Record<string, unknown> };
+      const mesh = obj as {
+        geometry?: { dispose(): void };
+        material?: { dispose(): void };
+        userData: Record<string, unknown>;
+      };
       if (mesh.userData?.ownsGeometry && mesh.geometry) mesh.geometry.dispose();
+      if (mesh.userData?.ownsMaterial && mesh.material) mesh.material.dispose();
     });
     this.group.clear();
   }

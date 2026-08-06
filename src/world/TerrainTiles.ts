@@ -44,6 +44,39 @@ const LEVELS: TileLevel[] = [
   { size: 2048, segments: 16, radius: 2 },
 ];
 
+/**
+ * How far each ring is sunk below the one inside it, metres per level.
+ *
+ * Rings lap over each other by a cell, and over that cell the coarse surface is
+ * as likely to be above the fine one as below - and where it is above, a single
+ * hundred-and-twenty-metre facet lies across the hillside in place of the
+ * detailed ground, shaded by its own coarse normal. Sinking each level a little
+ * settles it: the finer surface always wins the lap, and the step this leaves
+ * where the ring ends is inside what the skirt already covers.
+ */
+const LEVEL_SINK = 0.35;
+
+/**
+ * The rectangle a tile must leave out because a finer ring already covers it.
+ *
+ * Without this every ring is a solid block, so each level overlaps the one
+ * inside it by up to half a tile. Two meshes of different resolution sampling
+ * the same ground do not agree between their vertices, and the coarse one
+ * comes through the fine one as flat facets and z-fighting - which is most of
+ * what makes a generated middle distance look wrong, and on a steep hillside,
+ * where the two disagree by tens of metres, it is a scatter of dark slabs
+ * lying across the slope. Each ring is therefore punched hollow at exactly the
+ * block inside it. A cell can only be dropped whole, so the ring still laps a
+ * cell or so over the block - which is what leaves no gap - and `LEVEL_SINK`
+ * makes sure the finer surface wins wherever they do lap.
+ */
+interface Hole {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
 interface Tile {
   key: string;
   level: number;
@@ -54,11 +87,20 @@ interface Tile {
   priority: number;
 }
 
+interface TileJob {
+  key: string;
+  level: number;
+  ix: number;
+  iz: number;
+  priority: number;
+  hole: Hole | null;
+}
+
 export class TerrainTiles {
   readonly group = new Group();
   private readonly tiles = new Map<string, Tile>();
-  private readonly pending: { key: string; level: number; ix: number; iz: number; priority: number }[] = [];
-  private readonly projection: ProjectionResult = { s: 0, lateral: 0, hint: -1 };
+  private readonly pending: TileJob[] = [];
+  private readonly projection: ProjectionResult = { s: 0, lateral: 0, hint: -1, beyond: 0 };
 
   /** Number of levels actually used, reduced on lower quality settings. */
   levelCount = LEVELS.length;
@@ -98,6 +140,14 @@ export class TerrainTiles {
       let minZ = Infinity;
       let maxZ = -Infinity;
 
+      // What this ring must leave out: exactly the block inside it. Cells are
+      // dropped whole, so the ones that straddle the edge stay and the ring
+      // still laps over the block by up to one cell - no more than it has to.
+      const hole: Hole | null =
+        level > 0 && Number.isFinite(innerMinX)
+          ? { minX: innerMinX, maxX: innerMaxX, minZ: innerMinZ, maxZ: innerMaxZ }
+          : null;
+
       for (let dz = -radius; dz <= radius; dz++) {
         for (let dx = -radius; dx <= radius; dx++) {
           const ix = cx + dx;
@@ -116,13 +166,21 @@ export class TerrainTiles {
             continue;
           }
 
-          const key = `${level}:${ix}:${iz}`;
+          // A tile clear of the hole is the same mesh wherever the camera is,
+          // so it keeps a stable key and survives the camera moving; only the
+          // few that straddle the boundary are keyed to it and rebuilt.
+          const touches =
+            hole !== null && x1 > hole.minX && x0 < hole.maxX && z1 > hole.minZ && z0 < hole.maxZ;
+          const tileHole = touches ? hole : null;
+          const key = tileHole
+            ? `${level}:${ix}:${iz}:${tileHole.minX},${tileHole.maxX},${tileHole.minZ},${tileHole.maxZ}`
+            : `${level}:${ix}:${iz}`;
           wanted.add(key);
           if (!this.tiles.has(key) && !this.pending.some((p) => p.key === key)) {
             const centreX = x0 + size * 0.5;
             const centreZ = z0 + size * 0.5;
             const priority = Math.hypot(centreX - cameraX, centreZ - cameraZ);
-            this.pending.push({ key, level, ix, iz, priority });
+            this.pending.push({ key, level, ix, iz, priority, hole: tileHole });
           }
         }
       }
@@ -163,7 +221,7 @@ export class TerrainTiles {
     while (this.pending.length > 0 && performance.now() < deadline) {
       const job = this.pending.pop()!;
       if (this.tiles.has(job.key)) continue;
-      const mesh = this.buildTile(job.level, job.ix, job.iz);
+      const mesh = this.buildTile(job.level, job.ix, job.iz, job.hole);
       this.group.add(mesh);
       this.tiles.set(job.key, { ...job, mesh });
       built++;
@@ -179,11 +237,28 @@ export class TerrainTiles {
     return this.tiles.size;
   }
 
-  private buildTile(level: number, ix: number, iz: number): Mesh {
+  private buildTile(level: number, ix: number, iz: number, hole: Hole | null): Mesh {
     const { size, segments } = LEVELS[level];
     const step = size / segments;
     const originX = ix * size;
     const originZ = iz * size;
+
+    /** Is this grid cell entirely inside the ground a finer ring already draws? */
+    const cellHidden = (i: number, j: number): boolean => {
+      if (!hole) return false;
+      const x0 = originX + i * step;
+      const z0 = originZ + j * step;
+      return (
+        x0 >= hole.minX && x0 + step <= hole.maxX && z0 >= hole.minZ && z0 + step <= hole.maxZ
+      );
+    };
+    /** Deep enough inside the hole that no emitted triangle or normal reads it. */
+    const pointHidden = (x: number, z: number): boolean =>
+      hole !== null &&
+      x > hole.minX + step * 2 &&
+      x < hole.maxX - step * 2 &&
+      z > hole.minZ + step * 2 &&
+      z < hole.maxZ - step * 2;
 
     // Sample one extra ring of heights so normals at the tile border are
     // computed from real neighbours rather than from a clamped edge.
@@ -203,15 +278,26 @@ export class TerrainTiles {
     let tintR = 1;
     let tintG = 1;
     let tintB = 1;
+    let lastHeight = 0;
 
     for (let j = 0; j < n; j++) {
       const z = originZ + (j - 1) * step;
       for (let i = 0; i < n; i++) {
         const x = originX + (i - 1) * step;
-        const proj = this.field.project(x, z, this.projection.hint, this.projection, window);
-        const sample = this.field.sampleAt(proj.s);
-        const y = this.field.ground(sample, proj.lateral, x, z, true);
         const idx = j * n + i;
+        if (pointHidden(x, z)) {
+          // Never drawn and never read; carried at the last real height only so
+          // the bounding sphere stays honest.
+          heights[idx] = lastHeight;
+          colors[idx * 3] = 1;
+          colors[idx * 3 + 1] = 1;
+          colors[idx * 3 + 2] = 1;
+          continue;
+        }
+        const proj = this.field.project(x, z, this.projection.hint, this.projection, window);
+        const sample = this.field.sampleFor(proj);
+        const y = this.field.ground(sample, proj.lateral, x, z, true) - level * LEVEL_SINK;
+        lastHeight = y;
         heights[idx] = y;
         shore[idx] = this.field.shoreFactor(sample, proj.lateral, y);
         // The tint only changes with the biome blend, which moves along the
@@ -289,6 +375,7 @@ export class TerrainTiles {
     const indices: number[] = [];
     for (let j = 0; j < segments; j++) {
       for (let i = 0; i < segments; i++) {
+        if (cellHidden(i, j)) continue;
         const a = j * (segments + 1) + i;
         const b = a + 1;
         const c = a + segments + 1;
@@ -298,12 +385,22 @@ export class TerrainTiles {
     }
 
     // Skirt: duplicate the border ring, dropped far enough to cover the height
-    // a coarser neighbour can miss over one of its cells - and no further. A
-    // deep skirt hangs out of every hillside as a dark flap.
-    const drop = step * 0.45 + 0.8;
+    // a neighbour of a different resolution can miss - and no further.
+    //
+    // A fixed depth scaled to the cell is that depth everywhere, so on a level
+    // where a cell is a hundred metres across it is a sixty-metre curtain, and
+    // wherever the ground falls away it hangs clear of the hillside as a dark
+    // flap. What it actually has to cover is how much the ground moves over
+    // one cell *here*, which on the flat is nothing and on a mountainside is
+    // metres - so that is what it is measured from.
     let sv = gridVerts;
     const addSkirt = (i: number, j: number): number => {
       const src = j * (segments + 1) + i;
+      const relief = Math.max(
+        Math.abs(at(i + 1, j) - at(i - 1, j)),
+        Math.abs(at(i, j + 1) - at(i, j - 1)),
+      );
+      const drop = Math.min(16, 1.2 + LEVEL_SINK * level + relief * 1.3);
       const v = sv++;
       positions[v * 3] = positions[src * 3];
       positions[v * 3 + 1] = positions[src * 3 + 1] - drop;
@@ -322,7 +419,11 @@ export class TerrainTiles {
       return v;
     };
 
+    // A skirt only belongs where the tile has an edge to hide. Hung from a
+    // border that a finer ring already covers it is a dark flap standing in the
+    // middle of the ground.
     for (let i = 0; i < segments; i++) {
+      if (cellHidden(i, 0)) continue;
       const a = i * 1 + 0 * (segments + 1);
       const b = a + 1;
       const sa = addSkirt(i, 0);
@@ -330,6 +431,7 @@ export class TerrainTiles {
       indices.push(a, b, sa, b, sb, sa);
     }
     for (let i = 0; i < segments; i++) {
+      if (cellHidden(i, segments - 1)) continue;
       const a = segments * (segments + 1) + i;
       const b = a + 1;
       const sa = addSkirt(i, segments);
@@ -337,6 +439,7 @@ export class TerrainTiles {
       indices.push(a, sa, b, b, sa, sb);
     }
     for (let j = 0; j < segments; j++) {
+      if (cellHidden(0, j)) continue;
       const a = j * (segments + 1);
       const b = a + (segments + 1);
       const sa = addSkirt(0, j);
@@ -344,6 +447,7 @@ export class TerrainTiles {
       indices.push(a, sa, b, b, sa, sb);
     }
     for (let j = 0; j < segments; j++) {
+      if (cellHidden(segments - 1, j)) continue;
       const a = j * (segments + 1) + segments;
       const b = a + (segments + 1);
       const sa = addSkirt(segments, j);
@@ -351,14 +455,17 @@ export class TerrainTiles {
       indices.push(a, b, sa, b, sb, sa);
     }
 
+    // Skirt segments the hole suppressed leave unused slots at the end of the
+    // buffers; trim them rather than shipping vertices at the origin.
+    const used = sv;
     const geometry = new BufferGeometry();
-    geometry.setAttribute('position', new BufferAttribute(positions, 3));
-    geometry.setAttribute('normal', new BufferAttribute(normals, 3));
-    geometry.setAttribute('uv', new BufferAttribute(uvs, 2));
-    geometry.setAttribute('color', new BufferAttribute(vcolors, 3));
-    geometry.setAttribute('aSlope', new BufferAttribute(slopes, 1));
-    geometry.setAttribute('aShore', new BufferAttribute(shores, 1));
-    geometry.setAttribute('aCavity', new BufferAttribute(cavities, 1));
+    geometry.setAttribute('position', new BufferAttribute(positions.subarray(0, used * 3), 3));
+    geometry.setAttribute('normal', new BufferAttribute(normals.subarray(0, used * 3), 3));
+    geometry.setAttribute('uv', new BufferAttribute(uvs.subarray(0, used * 2), 2));
+    geometry.setAttribute('color', new BufferAttribute(vcolors.subarray(0, used * 3), 3));
+    geometry.setAttribute('aSlope', new BufferAttribute(slopes.subarray(0, used), 1));
+    geometry.setAttribute('aShore', new BufferAttribute(shores.subarray(0, used), 1));
+    geometry.setAttribute('aCavity', new BufferAttribute(cavities.subarray(0, used), 1));
     geometry.setIndex(indices);
     geometry.computeBoundingSphere();
 

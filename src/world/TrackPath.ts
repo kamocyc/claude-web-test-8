@@ -10,6 +10,7 @@ import {
   dominantBiome,
 } from './Biome';
 import { generateStationName, type PlaceName } from './Names';
+import type { RiverAxis } from './River';
 
 /** Distance between stored centre-line samples, metres. */
 export const SAMPLE_STEP = 2;
@@ -48,6 +49,13 @@ export interface TrackSample {
   structure: StructureKind;
   /** Nearby-station flag: suppresses lineside clutter through platforms. */
   stationZone: number;
+  /**
+   * Set by `TerrainField.project` when the query fell past the end of the
+   * generated route: how far past, in metres. Everything the railway does to
+   * the ground fades out over it, so the horizon is never shaped by whatever
+   * happened to be at the last sleeper.
+   */
+  beyond?: number;
 }
 
 export interface StationInfo {
@@ -88,6 +96,11 @@ export interface RiverInfo {
   width: number;
   skew: number;
   bankHeight: number;
+  /**
+   * World-space axis, resolved on first use by `riverAxis` and cached here so
+   * the terrain, the water surface and the bridge all see the same river.
+   */
+  axis?: RiverAxis;
 }
 
 export interface TunnelInfo {
@@ -268,6 +281,7 @@ export class TrackPath {
     r.riverStrength = lerp(a.riverStrength, b.riverStrength, t);
     r.structure = t < 0.5 ? a.structure : b.structure;
     r.stationZone = lerp(a.stationZone, b.stationZone, t);
+    r.beyond = 0;
     if (!r.weights) r.weights = new Float32Array(BIOME_IDS.length);
     for (let k = 0; k < r.weights.length; k++) r.weights[k] = lerp(a.weights[k], b.weights[k], t);
     return r;
@@ -647,11 +661,15 @@ export class TrackPath {
       def.id === 'riverside' ? 0.5 : def.id === 'farmland' ? 0.16 : def.id === 'city' ? 0.14 : 0.08;
     if (this.rng.chance(riverChance)) {
       const width = this.rng.range(40, 190);
-      const bridgeLength = width + this.rng.range(30, 90);
+      const skew = this.rng.range(-0.5, 0.5);
+      // The span has to clear the bed measured along the line, not across the
+      // channel: a skewed crossing is longer than the river is wide, and a
+      // bridge that stops short leaves the formation standing in the water.
+      const bridgeLength = width / Math.cos(skew) + this.rng.range(46, 110);
       this.rivers.push({
         s: s + bridgeLength * 0.5,
         width,
-        skew: this.rng.range(-0.55, 0.55),
+        skew,
         bankHeight: this.rng.range(3, 9),
       });
       this.bridges.push({

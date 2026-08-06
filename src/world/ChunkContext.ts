@@ -4,6 +4,7 @@ import type { QualityProfile } from '../core/Settings';
 import type { TrackPath, TrackSample, SignalInfo, CrossingInfo } from './TrackPath';
 import type { TerrainField } from './TerrainField';
 import type { WaterRegistry } from '../materials/WaterMaterial';
+import type { Occupancy } from './Sites';
 
 /** A signal that the block logic can re-aspect at runtime. */
 export interface DynamicSignal {
@@ -36,6 +37,8 @@ export interface ChunkContext {
   crossings: DynamicCrossing[];
   /** Chunks far from the camera skip the finest details. */
   detailed: boolean;
+  /** Ground booked by whatever has already been built in this chunk. */
+  sites: Occupancy;
 }
 
 export const CHUNK_LENGTH = 250;

@@ -389,6 +389,158 @@ export class TextureFactory {
     });
   }
 
+  /**
+   * Bodyside stainless steel, as it is actually built.
+   *
+   * A Japanese commuter EMU has a laser-welded stainless shell whose panels are
+   * stiffened by shallow beads rolled along the car. That beading, and the
+   * directional grain of the rolled sheet, is the whole reason a stainless
+   * bodyside reads as metal rather than as grey paint: it breaks the reflection
+   * of the sky into horizontal bands. The texture is laid so that its U axis
+   * runs up the body section, which puts the beads along the car.
+   */
+  stainless(): Texture {
+    return this.memo('stainless', () => {
+      const size = 256;
+      const { c, ctx } = canvas(size);
+      const img = ctx.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          // Beads every 32 texels up the section, with a bright top edge and a
+          // shaded underside, exactly as a rolled rib catches the light.
+          const t = ((x % 32) / 32 - 0.5) * 2;
+          const bead = Math.exp(-t * t * 14) * (t < 0 ? 1 : -0.75);
+          // Panel joints where the shell is welded up, every 128.
+          const joint = Math.abs((x % 128) - 1) < 1.2 ? -0.3 : 0;
+          // Brushed grain runs along the car, so it is fine across the section.
+          const grain = tileNoise(x / 1.3, y / 24, 200, 61) - 0.5;
+          const dust = tileFbm(x / 30, y / 70, 8, 19, 3);
+          const v = clamp01(0.84 + bead * 0.2 + joint + grain * 0.08 - dust * 0.1);
+          // Slightly cool: stainless is a touch blue against painted steel.
+          img.data[i] = v * 232;
+          img.data[i + 1] = v * 236;
+          img.data[i + 2] = v * 240;
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return finish(c);
+    });
+  }
+
+  stainlessNormal(): Texture {
+    return this.memo('stainlessN', () => {
+      const size = 256;
+      const h = new Float32Array(size * size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const t = ((x % 32) / 32 - 0.5) * 2;
+          const joint = Math.abs((x % 128) - 1) < 1.2 ? -0.6 : 0;
+          h[y * size + x] = Math.exp(-t * t * 14) * 0.9 + joint + tileNoise(x / 1.3, y / 20, 200, 61) * 0.06;
+        }
+      }
+      return normalFromHeight(h, size, 1.6);
+    });
+  }
+
+  /**
+   * Warning stripes. Japanese lineside kit that has to be seen - a crossing
+   * barrier, the pole it swings from, a buffer stop - is painted in 警戒色,
+   * diagonal yellow and black.
+   */
+  hazardStripe(yellow = 0xf2c118, dark = 0x1c1c1e): Texture {
+    return this.memo(`hazard${yellow}_${dark}`, () => {
+      const size = 128;
+      const { c, ctx } = canvas(size);
+      ctx.fillStyle = `#${yellow.toString(16).padStart(6, '0')}`;
+      ctx.fillRect(0, 0, size, size);
+      ctx.fillStyle = `#${dark.toString(16).padStart(6, '0')}`;
+      // Bands at 45 degrees, drawn twice so the pattern wraps in both axes.
+      ctx.save();
+      ctx.translate(size / 2, size / 2);
+      ctx.rotate(-Math.PI / 4);
+      for (let x = -size * 1.5; x < size * 1.5; x += size / 4) {
+        ctx.fillRect(x, -size * 1.5, size / 8, size * 3);
+      }
+      ctx.restore();
+      // Dirt thrown up off the road.
+      const img = ctx.getImageData(0, 0, size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          const grime = tileFbm(x / 26, y / 26, 5, 31, 3) * 0.22;
+          img.data[i] *= 1 - grime;
+          img.data[i + 1] *= 1 - grime;
+          img.data[i + 2] *= 1 - grime * 0.85;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return finish(c);
+    });
+  }
+
+  /**
+   * Corrugated steel sheet, for canopy roofs, warehouses and lock-ups. The
+   * profile is a sine wave, so it shades as a curve rather than as a stair.
+   */
+  corrugated(color = 0xb8bdc2): Texture {
+    return this.memo(`corrugated${color}`, () => {
+      const size = 256;
+      const { c, ctx } = canvas(size);
+      const r = (color >> 16) & 255;
+      const g = (color >> 8) & 255;
+      const b = color & 255;
+      const img = ctx.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          const wave = Math.sin((x / 21.33) * Math.PI * 2);
+          // Fixing screws in rows down the sheet, on the crowns.
+          const screw =
+            wave > 0.85 && Math.abs((y % 64) - 32) < 2 ? -0.28 : 0;
+          const rust = smoothstep(0.72, 0.95, tileFbm(x / 40, y / 40, 6, 43, 3));
+          const v = clamp01(0.84 + wave * 0.15 + screw + tileNoise(x / 2, y / 2, 128, 7) * 0.05);
+          img.data[i] = lerp(r * v, 150 * v, rust);
+          img.data[i + 1] = lerp(g * v, 96 * v, rust);
+          img.data[i + 2] = lerp(b * v, 68 * v, rust);
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return finish(c);
+    });
+  }
+
+  /**
+   * Level crossing deck: the rubber and precast panels laid between and
+   * outside the rails, worn shiny by tyres in two wheel tracks.
+   */
+  crossingDeck(): Texture {
+    return this.memo('crossingDeck', () => {
+      const size = 256;
+      const { c, ctx } = canvas(size);
+      const img = ctx.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          // Anti-skid grooves run across the road, i.e. along the rails.
+          const groove = Math.abs(((y % 12) / 12) - 0.5) > 0.4 ? -0.16 : 0;
+          const panel = Math.abs((x % 128) - 2) < 2.5 ? -0.22 : 0;
+          const grain = tileNoise(x / 2, y / 2, 128, 29) * 0.12;
+          const polish = smoothstep(0.3, 0.75, tileFbm(x / 60, y / 18, 5, 11, 3)) * 0.1;
+          const v = clamp01(0.4 + groove + panel + grain + polish);
+          img.data[i] = v * 168;
+          img.data[i + 1] = v * 166;
+          img.data[i + 2] = v * 162;
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return finish(c);
+    });
+  }
+
   /** Weathered steel for rail webs, bridges and gantries. */
   steel(): Texture {
     return this.memo('steel', () => {
@@ -398,12 +550,12 @@ export class TextureFactory {
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
           const i = (y * size + x) * 4;
-          const rust = smoothstep(0.55, 0.9, tileFbm(x / 34, y / 34, 8, 55, 4));
+          const rust = smoothstep(0.6, 0.92, tileFbm(x / 34, y / 34, 8, 55, 4));
           const grain = tileNoise(x / 1.8, y / 8, 140, 31);
-          const base = 0.42 + grain * 0.16;
-          img.data[i] = clamp01(lerp(base, base * 1.5, rust)) * 190;
-          img.data[i + 1] = clamp01(lerp(base, base * 0.95, rust)) * 188;
-          img.data[i + 2] = clamp01(lerp(base * 1.02, base * 0.6, rust)) * 186;
+          const base = 0.72 + grain * 0.16;
+          img.data[i] = clamp01(lerp(base, base * 1.15, rust)) * 226;
+          img.data[i + 1] = clamp01(lerp(base, base * 0.82, rust)) * 224;
+          img.data[i + 2] = clamp01(lerp(base * 1.02, base * 0.58, rust)) * 222;
           img.data[i + 3] = 255;
         }
       }
@@ -557,23 +709,31 @@ export class TextureFactory {
     });
   }
 
-  /** Platform surface: pale paving with a yellow tactile strip at the edge. */
+  /**
+   * Platform deck: precast slabs on a 60 cm module with the joints picked out,
+   * scuffed along the walking line and stained where the canopy drips.
+   */
   platform(): Texture {
     return this.memo('platform', () => {
-      const size = 256;
+      const size = 512;
       const { c, ctx } = canvas(size);
-      ctx.fillStyle = '#b9b4ab';
-      ctx.fillRect(0, 0, size, size);
-      const img = ctx.getImageData(0, 0, size, size);
+      const img = ctx.createImageData(size, size);
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
           const i = (y * size + x) * 4;
-          const grain = tileNoise(x / 2, y / 2, 128, 13) * 0.12;
-          const joint = x % 64 < 1.5 || y % 64 < 1.5 ? -0.14 : 0;
-          const v = 1 + grain - 0.06 + joint;
-          img.data[i] *= v;
-          img.data[i + 1] *= v;
-          img.data[i + 2] *= v;
+          // Slabs, offset course to course so the joints are not a grid.
+          const row = Math.floor(y / 128);
+          const sx = (x + row * 64) % 128;
+          const joint =
+            Math.min(sx, 128 - sx) < 1.6 || Math.min(y % 128, 128 - (y % 128)) < 1.6 ? -0.2 : 0;
+          const slab = hashFloat(Math.floor((x + row * 64) / 128), row, 3) * 0.07;
+          const grain = tileNoise(x / 2.1, y / 2.1, 244, 13) * 0.1;
+          const wear = tileFbm(x / 70, y / 70, 7, 53, 3) * 0.16;
+          const v = clamp01(0.78 + joint + slab + grain - wear);
+          img.data[i] = v * 214;
+          img.data[i + 1] = v * 210;
+          img.data[i + 2] = v * 202;
+          img.data[i + 3] = 255;
         }
       }
       ctx.putImageData(img, 0, 0);
@@ -581,68 +741,201 @@ export class TextureFactory {
     });
   }
 
+  /**
+   * Tactile paving, to the Japanese pattern: 内方線付き点状ブロック - the
+   * warning block of raised dots that runs along a platform edge, with a pair
+   * of raised lines on the side away from the drop so a blind passenger can
+   * tell by foot which way safety is. Laid as 30 cm blocks, five dots square.
+   */
   tactile(): Texture {
     return this.memo('tactile', () => {
-      const size = 128;
+      const size = 256;
       const { c, ctx } = canvas(size);
-      ctx.fillStyle = '#d8b12c';
+      // One block per 128 texels; the strip is two blocks wide across V.
+      ctx.fillStyle = '#e0ae1c';
       ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = 'rgba(120,90,20,0.55)';
-      for (let y = 8; y < size; y += 16) {
-        for (let x = 8; x < size; x += 16) {
-          ctx.beginPath();
-          ctx.arc(x, y, 4.5, 0, 6.29);
-          ctx.fill();
+      // Block joints.
+      ctx.strokeStyle = 'rgba(110,82,12,0.5)';
+      ctx.lineWidth = 2;
+      for (let p = 0; p <= size; p += 128) {
+        ctx.beginPath();
+        ctx.moveTo(p, 0);
+        ctx.lineTo(p, size);
+        ctx.moveTo(0, p);
+        ctx.lineTo(size, p);
+        ctx.stroke();
+      }
+      for (let by = 0; by < size; by += 128) {
+        for (let bx = 0; bx < size; bx += 128) {
+          // 5x5 dots per block.
+          for (let j = 0; j < 5; j++) {
+            for (let i = 0; i < 5; i++) {
+              const x = bx + 18 + i * 23;
+              const y = by + 18 + j * 23;
+              const grad = ctx.createRadialGradient(x - 3, y - 3, 1, x, y, 10);
+              grad.addColorStop(0, 'rgba(255,236,158,0.95)');
+              grad.addColorStop(0.6, 'rgba(224,174,28,0.9)');
+              grad.addColorStop(1, 'rgba(126,92,12,0.75)');
+              ctx.fillStyle = grad;
+              ctx.beginPath();
+              ctx.arc(x, y, 9, 0, 6.29);
+              ctx.fill();
+            }
+          }
+        }
+        // The inner line: two ribs along the platform, on the safe side.
+        ctx.fillStyle = 'rgba(255,232,150,0.9)';
+        ctx.fillRect(0, by + 106, size, 5);
+        ctx.fillRect(0, by + 116, size, 5);
+        ctx.fillStyle = 'rgba(120,88,12,0.5)';
+        ctx.fillRect(0, by + 111, size, 3);
+        ctx.fillRect(0, by + 121, size, 3);
+      }
+      const img = ctx.getImageData(0, 0, size, size);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          const grime = tileFbm(x / 34, y / 34, 7, 23, 3) * 0.24;
+          img.data[i] *= 1 - grime;
+          img.data[i + 1] *= 1 - grime;
+          img.data[i + 2] *= 1 - grime * 0.7;
         }
       }
+      ctx.putImageData(img, 0, 0);
       return finish(c);
     });
   }
 
-  /** Station name board: kanji above, romaji below, in JR house style. */
-  stationSign(ja: string, ro: string, prev?: string, next?: string): Texture {
-    return this.memo(`sign_${ja}_${prev ?? ''}_${next ?? ''}`, () => {
+  /**
+   * Station name board in the JR house style: the name large in kanji with the
+   * kana above it, romaji below, the line colour as a band under the lot, and
+   * the neighbouring stations in the bottom corners with an arrow pointing the
+   * way the train goes.
+   */
+  stationSign(ja: string, ro: string, prev?: string, next?: string, lineColor = 0x0a8f4c): Texture {
+    return this.memo(`sign_${ja}_${prev ?? ''}_${next ?? ''}_${lineColor}`, () => {
       const w = 1024;
       const h = 256;
       const { c, ctx } = canvas(w, h);
-      ctx.fillStyle = '#f4f2ec';
+      const line = `#${lineColor.toString(16).padStart(6, '0')}`;
+
+      ctx.fillStyle = '#fbfaf6';
       ctx.fillRect(0, 0, w, h);
-      ctx.fillStyle = '#0a4c8b';
-      ctx.fillRect(0, 0, w, 16);
-      ctx.fillRect(0, h - 16, w, 16);
+      // Frame and the coloured band the whole design hangs off.
+      ctx.strokeStyle = '#c9c6bd';
+      ctx.lineWidth = 6;
+      ctx.strokeRect(3, 3, w - 6, h - 6);
+      ctx.fillStyle = line;
+      ctx.fillRect(6, h - 76, w - 12, 12);
 
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#16181c';
-      ctx.font = 'bold 108px "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif';
-      ctx.fillText(ja, w / 2, 132);
-      ctx.font = '46px "Helvetica Neue", Arial, sans-serif';
-      ctx.fillStyle = '#3a3f47';
-      ctx.fillText(ro.toUpperCase(), w / 2, 190);
+      // Kana reading, small, above the name.
+      ctx.fillStyle = '#4a5058';
+      ctx.font = '38px "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif';
+      ctx.fillText(ja, w / 2, 54);
+      // The name itself.
+      ctx.fillStyle = '#101318';
+      ctx.font = 'bold 104px "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif';
+      ctx.fillText(ja, w / 2, 148);
+      ctx.font = '40px "Helvetica Neue", Arial, sans-serif';
+      ctx.fillStyle = '#2f343b';
+      ctx.fillText(ro.toUpperCase(), w / 2, 196);
 
-      ctx.font = '34px "Helvetica Neue", Arial, sans-serif';
-      ctx.fillStyle = '#5b626c';
+      // Neighbours, sat on the band.
+      ctx.font = '34px "Hiragino Sans", "Noto Sans JP", sans-serif';
+      ctx.fillStyle = '#333940';
       if (prev) {
         ctx.textAlign = 'left';
-        ctx.fillText(`◀ ${prev}`, 32, 226);
+        ctx.fillText(`◀ ${prev}`, 26, 226);
       }
       if (next) {
         ctx.textAlign = 'right';
-        ctx.fillText(`${next} ▶`, w - 32, 226);
+        ctx.fillText(`${next} ▶`, w - 26, 226);
       }
       return finish(c, true, false);
     });
   }
 
-  /** Rolling-stock destination blind. */
+  /** Platform number board: white numeral on the line colour. */
+  platformNumber(n: number, lineColor = 0x0a4c8b): Texture {
+    return this.memo(`platnum${n}_${lineColor}`, () => {
+      const { c, ctx } = canvas(256, 256);
+      ctx.fillStyle = '#f7f6f2';
+      ctx.fillRect(0, 0, 256, 256);
+      ctx.fillStyle = `#${lineColor.toString(16).padStart(6, '0')}`;
+      ctx.fillRect(0, 0, 256, 168);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 130px "Helvetica Neue", Arial, sans-serif';
+      ctx.fillText(String(n), 128, 128);
+      ctx.fillStyle = '#20262d';
+      ctx.font = 'bold 54px "Hiragino Sans", "Noto Sans JP", sans-serif';
+      ctx.fillText('番線', 128, 228);
+      return finish(c, true, false);
+    });
+  }
+
+  /**
+   * Departure indicator: the amber dot-matrix board that hangs at the end of
+   * every platform, with the scan lines of the matrix left visible.
+   */
+  departureBoard(destination: string, time: string): Texture {
+    return this.memo(`depboard_${destination}_${time}`, () => {
+      const w = 512;
+      const h = 128;
+      const { c, ctx } = canvas(w, h);
+      ctx.fillStyle = '#07080a';
+      ctx.fillRect(0, 0, w, h);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#ffb02a';
+      ctx.font = 'bold 34px "Hiragino Sans", "Noto Sans JP", sans-serif';
+      ctx.fillText('普通', 16, 48);
+      ctx.fillText(destination, 118, 48);
+      ctx.fillStyle = '#7ce0a0';
+      ctx.font = 'bold 34px "Helvetica Neue", Arial, sans-serif';
+      ctx.fillText(time, 16, 104);
+      ctx.fillStyle = '#ffb02a';
+      ctx.font = '30px "Hiragino Sans", "Noto Sans JP", sans-serif';
+      ctx.fillText('4両', w - 96, 104);
+      // Matrix gaps: one dark texel row in three, which is what makes a dot
+      // matrix read as a dot matrix instead of as painted text.
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      for (let y = 0; y < h; y += 3) ctx.fillRect(0, y, w, 1);
+      for (let x = 0; x < w; x += 3) ctx.fillRect(x, 0, 1, h);
+      return finish(c, true, false);
+    });
+  }
+
+  /** Rolling-stock destination blind: LED type, amber on black. */
   destinationBlind(text: string): Texture {
     return this.memo(`blind_${text}`, () => {
-      const { c, ctx } = canvas(256, 64);
-      ctx.fillStyle = '#14161a';
-      ctx.fillRect(0, 0, 256, 64);
-      ctx.fillStyle = '#ff7a1a';
+      const w = 256;
+      const h = 64;
+      const { c, ctx } = canvas(w, h);
+      ctx.fillStyle = '#0a0b0d';
+      ctx.fillRect(0, 0, w, h);
       ctx.textAlign = 'center';
-      ctx.font = 'bold 40px "Hiragino Sans", "Noto Sans JP", sans-serif';
-      ctx.fillText(text, 128, 48);
+      ctx.fillStyle = '#7fd6ff';
+      ctx.font = 'bold 26px "Hiragino Sans", "Noto Sans JP", sans-serif';
+      ctx.fillText('普通', 44, 42);
+      ctx.fillStyle = '#ffae2b';
+      ctx.font = 'bold 34px "Hiragino Sans", "Noto Sans JP", sans-serif';
+      ctx.fillText(text, 160, 44);
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      for (let y = 0; y < h; y += 2) ctx.fillRect(0, y, w, 1);
+      return finish(c, true, false);
+    });
+  }
+
+  /** Car number and door sticker artwork, applied to the bodyside. */
+  carNumber(text: string): Texture {
+    return this.memo(`carno_${text}`, () => {
+      const { c, ctx } = canvas(128, 32);
+      ctx.clearRect(0, 0, 128, 32);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#20242a';
+      ctx.font = 'bold 22px "Helvetica Neue", Arial, sans-serif';
+      ctx.fillText(text, 64, 24);
       return finish(c, true, false);
     });
   }
