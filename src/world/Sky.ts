@@ -10,25 +10,34 @@ import {
   Scene,
   ShaderMaterial,
   SphereGeometry,
+  Vector2,
   Vector3,
   type WebGLRenderer,
   type WebGLRenderTarget,
 } from 'three';
 import { clamp, clamp01, lerp, smoothstep } from '../core/MathUtils';
+import { SKY_MAPPING_GLSL } from './sky/AtmosphereGlsl';
+import { SkyLuts } from './sky/SkyLuts';
+import { CloudLayer } from './sky/CloudLayer';
+import { NIGHT_GLSL } from './sky/NightGlsl';
+import { aerialUniforms, installAerialPerspective } from './sky/AerialPerspective';
 
 /**
- * Sky, sun and atmosphere.
+ * Sky, atmosphere and natural light.
  *
- * An analytic sky dome (gradient + Mie sun glow + procedural cloud deck +
- * stars) drives the scene's directional and ambient light, the fog colour and
- * the lens glare, so a change of time of day or weather ripples through the
- * whole image consistently.
+ * The sky is a physically based scattering model - Rayleigh, Mie and ozone on
+ * a spherical planet - baked into small look-up tables at run time, with a
+ * raymarched volumetric cloud layer over it and a real star field and moon
+ * behind. Everything else in the frame is lit from it: the sun's colour is the
+ * atmosphere's transmittance along the sun ray, the ambient is a prefiltered
+ * environment map of this same sky, and every distant surface is blended into
+ * the sky radiance in its own direction so the horizon has no seam.
  */
 
 const skyVertex = /* glsl */ `
   varying vec3 vDir;
   void main() {
-    vDir = normalize((modelMatrix * vec4(position, 1.0)).xyz - cameraPosition);
+    vDir = (modelMatrix * vec4(position, 1.0)).xyz - cameraPosition;
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mvPosition;
     gl_Position.z = gl_Position.w; // force to the far plane
@@ -38,130 +47,84 @@ const skyVertex = /* glsl */ `
 const skyFragment = /* glsl */ `
   precision highp float;
 
+  uniform sampler2D uSkyView;
+  uniform vec2 uSkyViewTexel;
+  uniform sampler2D uClouds;
+
   uniform vec3 uSunDir;
+  uniform vec3 uMoonDir;
+  uniform vec3 uSunTint;
+  uniform vec3 uSunDisc;
+  uniform vec3 uMoonTint;
+  uniform vec3 uGalacticPole;
   uniform float uTime;
-  uniform float uCloudCover;
-  uniform float uCloudSpeed;
-  uniform float uHaze;
-  uniform float uExposure;
-  uniform vec3 uWindDir;
+  uniform float uStars;
+  uniform float uSunRadius;
+  uniform float uMoonRadius;
+  uniform float uCloudFade;
+  uniform float uGroundFade;
 
   varying vec3 vDir;
 
-  float hash(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-  }
+  ${SKY_MAPPING_GLSL}
+  ${NIGHT_GLSL}
 
-  float valueNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-  }
-
-  float fbm(vec2 p) {
-    float v = 0.0;
-    float a = 0.5;
-    mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
-    for (int i = 0; i < 5; i++) {
-      v += a * valueNoise(p);
-      p = rot * p * 2.02;
-      a *= 0.5;
-    }
-    return v;
-  }
-
-  float starField(vec3 dir) {
-    vec2 uv = dir.xz / max(abs(dir.y), 0.08) * 1.4;
-    vec2 cell = floor(uv * 60.0);
-    float r = hash(cell);
-    if (r < 0.9955) return 0.0;
-    vec2 local = fract(uv * 60.0) - 0.5;
-    float d = length(local);
-    float twinkle = 0.65 + 0.35 * sin(uTime * 2.1 + r * 90.0);
-    return smoothstep(0.14, 0.0, d) * twinkle;
+  /** Inverse of the cloud table's azimuth/elevation mapping. */
+  vec2 cloudUv(vec3 d) {
+    float azimuth = atan(d.z, d.x);
+    float elev = asin(clamp(d.y, 0.0, 1.0));
+    return vec2(azimuth / (2.0 * SKY_PI) + 0.5, sqrt(elev / (SKY_PI * 0.5)));
   }
 
   void main() {
     vec3 dir = normalize(vDir);
-    float elev = uSunDir.y;
-    float up = clamp(dir.y, -1.0, 1.0);
+    vec3 sky = skyRadiance(uSkyView, uSkyViewTexel, dir, uSunDir, uSunTint);
 
-    float day = smoothstep(-0.10, 0.18, elev);
-    float night = 1.0 - smoothstep(-0.20, -0.02, elev);
-    float dusk = exp(-pow((elev - 0.02) / 0.11, 2.0));
+    // How bright the air already is decides whether anything behind it shows.
+    float skyLuma = dot(sky, vec3(0.2126, 0.7152, 0.0722));
+    float behind = exp(-skyLuma * 26.0);
 
-    vec3 zenithDay = vec3(0.075, 0.215, 0.585);
-    vec3 horizonDay = vec3(0.62, 0.735, 0.885);
-    vec3 zenithDusk = vec3(0.115, 0.135, 0.34);
-    vec3 horizonDusk = vec3(1.15, 0.46, 0.22);
-    vec3 zenithNight = vec3(0.008, 0.014, 0.036);
-    vec3 horizonNight = vec3(0.035, 0.05, 0.085);
-
-    vec3 zenith = mix(zenithNight, zenithDay, day);
-    vec3 horizon = mix(horizonNight, horizonDay, day);
-    zenith = mix(zenith, zenithDusk, dusk * 0.85);
-    horizon = mix(horizon, horizonDusk, dusk * 0.9);
-
-    float t = pow(clamp(1.0 - up, 0.0, 1.0), 3.2 - uHaze * 0.6);
-    vec3 sky = mix(zenith, horizon, t);
-
-    // Ground bounce below the horizon so the dome does not read as a hard edge.
-    float below = smoothstep(0.0, -0.12, up);
-    sky = mix(sky, mix(vec3(0.10, 0.11, 0.10), horizon * 0.55, 0.5), below);
-
-    float sunDot = max(dot(dir, uSunDir), 0.0);
-
-    // Mie forward scattering halo, stronger in hazy air and at low sun.
-    float halo = pow(sunDot, 7.0) * (0.28 + uHaze * 0.35) + pow(sunDot, 2.0) * 0.06;
-    vec3 sunTint = mix(vec3(1.0, 0.93, 0.82), vec3(1.35, 0.55, 0.24), dusk);
-    sky += sunTint * halo * (0.35 + day * 0.9);
-
-    // The solar disc itself, kept bright enough to bloom.
-    float disc = smoothstep(0.99965, 0.99992, sunDot);
-    sky += sunTint * disc * 22.0 * smoothstep(-0.06, 0.02, elev);
-
-    // Moon.
-    float moonDot = max(dot(dir, -uSunDir), 0.0);
-    float moon = smoothstep(0.99975, 0.99994, moonDot);
-    sky += vec3(0.85, 0.88, 1.0) * moon * 6.0 * night;
-    sky += vec3(0.5, 0.55, 0.72) * pow(moonDot, 220.0) * 0.25 * night;
-
-    sky += vec3(0.9, 0.94, 1.0) * starField(dir) * night * step(0.02, dir.y);
-
-    // Cloud deck projected onto a plane above the observer.
-    if (dir.y > 0.005) {
-      vec2 cuv = dir.xz / dir.y;
-      vec2 drift = uWindDir.xz * uTime * uCloudSpeed;
-      // Frequency matters more than coverage here: at the old scale barely
-      // three noise cells spanned the whole dome, so a given view of the sky
-      // was as likely as not to contain no cloud at all.
-      float base = fbm(cuv * 0.2 + drift * 0.02);
-      float detail = fbm(cuv * 0.62 + drift * 0.05 + base);
-      float density = base * 0.75 + detail * 0.35;
-      // Even a clear day has fair weather cumulus in it; an empty sky is the
-      // quickest way to make a landscape look unfinished.
-      float coverage = mix(0.62, 0.18, uCloudCover);
-      float cloud = smoothstep(coverage, coverage + 0.22, density);
-      cloud *= smoothstep(0.005, 0.09, dir.y); // fade into the horizon haze
-
-      // Shade the cloud by sampling the field towards the sun.
-      vec2 lightUv = cuv * 0.2 + drift * 0.02 + uSunDir.xz * 0.6;
-      float lit = smoothstep(coverage, coverage + 0.3, fbm(lightUv) * 0.75 + detail * 0.35);
-      vec3 cloudLit = mix(vec3(1.0, 0.97, 0.93), sunTint * 1.25, dusk * 0.8) * (0.45 + day * 0.75);
-      vec3 cloudDark = mix(vec3(0.16, 0.18, 0.22), vec3(0.30, 0.22, 0.24), dusk) * (0.35 + day * 0.8);
-      vec3 cloudCol = mix(cloudLit, cloudDark, clamp(lit * 0.85, 0.0, 1.0));
-      cloudCol += sunTint * pow(sunDot, 12.0) * 0.5 * (1.0 - lit);
-      sky = mix(sky, cloudCol, cloud * 0.94);
+    if (behind > 0.004) {
+      float galacticDensity = 0.0;
+      vec3 night = milkyWay(dir, uGalacticPole, galacticDensity) * 0.055;
+      vec2 uvFace;
+      float face;
+      cubeFace(dir, uvFace, face);
+      night += starLayer(uvFace, face, 30.0, 0.10, 1.0, uTime, galacticDensity);
+      night += starLayer(uvFace, face, 88.0, 0.13, 0.75, uTime * 0.7, galacticDensity) * 0.60;
+      night += starLayer(uvFace, face, 230.0, 0.11, 0.55, uTime * 1.3, galacticDensity) * 0.34;
+      sky += night * uStars * behind;
     }
 
-    gl_FragColor = vec4(sky * uExposure, 1.0);
+    // The moon: its own place in the sky, lit by the real sun direction.
+    float moonMask;
+    sky += moonDisc(dir, uMoonDir, uSunDir, uMoonRadius, moonMask) * uMoonTint * behind;
+
+    // The solar disc at its true angular size, with limb darkening.
+    float sc = dot(dir, uSunDir);
+    if (sc > 0.9) {
+      float ang = length(dir - uSunDir * sc);
+      float x = ang / uSunRadius;
+      if (x < 1.35) {
+        float mu = sqrt(max(0.0, 1.0 - min(x * x, 1.0)));
+        float limb = 1.0 - 0.47 * (1.0 - mu) - 0.23 * (1.0 - mu * mu);
+        sky += uSunDisc * limb * smoothstep(1.02, 0.94, x);
+      }
+    }
+
+    // Clouds, composited over everything that is further away than they are.
+    if (dir.y > -0.03) {
+      vec4 cl = texture2D(uClouds, cloudUv(dir));
+      float fade = uCloudFade * smoothstep(-0.03, 0.02, dir.y);
+      float t = mix(1.0, cl.a, fade);
+      sky = sky * t + cl.rgb * fade;
+    }
+
+    // Below the horizon the dome is only ever seen past the edge of the land;
+    // dropping it towards the ground haze keeps that join invisible.
+    sky *= mix(1.0, uGroundFade, smoothstep(0.0, -0.16, dir.y));
+
+    gl_FragColor = vec4(sky, 1.0);
   }
 `;
 
@@ -173,6 +136,98 @@ export interface WeatherState {
   /** Wind speed in m/s, drives foliage sway and cloud drift. */
   wind: number;
   windDirection: number;
+  /** 0 = clear air, 1 = thick fog bank. */
+  fog?: number;
+  /** 0 = rain, 1 = snow, for the same precipitation rate. */
+  snow?: number;
+  /** Aerosol load: 1 crisp winter air, 6 summer murk. */
+  turbidity?: number;
+}
+
+interface ResolvedWeather {
+  cloudCover: number;
+  rain: number;
+  wind: number;
+  windDirection: number;
+  fog: number;
+  snow: number;
+  turbidity: number;
+}
+
+const DEG = Math.PI / 180;
+/** Roughly Kanto; the sun path and the length of the day follow from it. */
+const LATITUDE = 35.7 * DEG;
+const AXIAL_TILT = 23.44 * DEG;
+
+const RAYLEIGH = [5.802e-3, 13.558e-3, 33.1e-3];
+const MIE_SCATTER = 3.996e-3;
+const MIE_ABSORB = 4.4e-3;
+const OZONE = [0.65e-3, 1.881e-3, 0.085e-3];
+const GROUND_RADIUS_KM = 6360;
+const ATMO_RADIUS_KM = 6460;
+
+/** Transmittance of the atmosphere along a ray, evaluated on the CPU. */
+function transmittance(out: Color, heightKm: number, mu: number, turbidity: number): void {
+  const r = GROUND_RADIUS_KM + Math.max(heightKm, 0);
+  const b = r * mu;
+  const disc = b * b - (r * r - ATMO_RADIUS_KM * ATMO_RADIUS_KM);
+  const tMax = disc > 0 ? -b + Math.sqrt(disc) : 0;
+  // A ray that dips into the planet never gets out: the sun is below the
+  // horizon and none of its light reaches the observer directly.
+  const groundDisc = b * b - (r * r - GROUND_RADIUS_KM * GROUND_RADIUS_KM);
+  if (mu < 0 && groundDisc > 0 && -b - Math.sqrt(groundDisc) > 0) {
+    out.setRGB(0, 0, 0);
+    return;
+  }
+
+  const steps = 24;
+  const dt = tMax / steps;
+  let odR = 0;
+  let odM = 0;
+  let odO = 0;
+  for (let i = 0; i < steps; i++) {
+    const t = dt * (i + 0.5);
+    const h = Math.sqrt(r * r + t * t + 2 * r * t * mu) - GROUND_RADIUS_KM;
+    odR += Math.exp(-Math.max(h, 0) / 8) * dt;
+    odM += Math.exp(-Math.max(h, 0) / 1.2) * turbidity * dt;
+    odO += Math.max(0, 1 - Math.abs(h - 25) / 15) * dt;
+  }
+  out.setRGB(
+    Math.exp(-(RAYLEIGH[0] * odR + (MIE_SCATTER + MIE_ABSORB) * odM + OZONE[0] * odO)),
+    Math.exp(-(RAYLEIGH[1] * odR + (MIE_SCATTER + MIE_ABSORB) * odM + OZONE[1] * odO)),
+    Math.exp(-(RAYLEIGH[2] * odR + (MIE_SCATTER + MIE_ABSORB) * odM + OZONE[2] * odO)),
+  );
+}
+
+/** The cloudscape each weather state should produce. */
+function cloudLook(w: ResolvedWeather): {
+  type: number;
+  bottom: number;
+  top: number;
+  density: number;
+  absorption: number;
+  detail: number;
+  cirrus: number;
+  floor: number;
+} {
+  const storm = clamp01(w.rain * 1.2);
+  const overcast = smoothstep(0.6, 0.95, w.cloudCover);
+  // Fair weather cumulus lift and shrink as the sky clears; an overcast sky
+  // drops to a flat sheet just above the hills; rain brings it lower still and
+  // turns it into something with a lot of water in it.
+  const type = lerp(lerp(1, 0.25, overcast), 0.3, storm);
+  const bottom = lerp(lerp(1500, 780, overcast), 420, storm) + w.fog * -200;
+  const top = lerp(lerp(2900, 1750, overcast), 3000, storm);
+  return {
+    type,
+    bottom,
+    top,
+    density: lerp(1, 1.5, overcast) * lerp(1, 1.9, storm),
+    absorption: lerp(1, 1.35, overcast) * lerp(1, 2.2, storm),
+    detail: lerp(0.34, 0.2, overcast),
+    cirrus: lerp(0.38, 0.0, smoothstep(0.2, 0.62, w.cloudCover)),
+    floor: clamp01(overcast * 0.55 + storm * 0.25),
+  };
 }
 
 export class SkySystem {
@@ -181,6 +236,7 @@ export class SkySystem {
   readonly hemi = new HemisphereLight(0x9fc4ff, 0x4a4433, 0.6);
   readonly ambient = new AmbientLight(0xffffff, 0.12);
   readonly sunDirection = new Vector3(0.4, 0.5, 0.3).normalize();
+  readonly moonDirection = new Vector3(-0.4, 0.5, -0.3).normalize();
 
   private readonly dome: Mesh;
   private readonly envDome: Mesh;
@@ -192,27 +248,68 @@ export class SkySystem {
   private readonly material: ShaderMaterial;
   private readonly fog: FogExp2;
   private readonly horizonColor = new Color();
+  private readonly zenithColor = new Color(0.075, 0.215, 0.585);
+
+  private readonly luts = new SkyLuts();
+  private readonly clouds: CloudLayer;
+
+  private readonly sunTransmittance = new Color(1, 1, 1);
+  private readonly sunTint = new Vector3(1, 1, 1);
+  private readonly keyDirection = new Vector3(0, 1, 0);
+  private readonly keyColor = new Vector3(1, 1, 1);
+  private readonly groundBounce = new Vector3(0.05, 0.05, 0.05);
+  private readonly scratch = new Color();
+  private cloudShadow = 0;
+  private cameraY = 0;
+  private exposure = 1;
+  private lastWall = 0;
 
   /** Time of day in seconds since midnight. */
   timeOfDay = 16 * 3600 + 42 * 60;
   /** Simulated day length multiplier; 1 = real time. */
   timeScale = 60;
+  /**
+   * Day of the year, which sets the sun's declination and so the length of the
+   * day. Late September: an even day, a sun that sets around six, and the low
+   * autumn light Japanese railway photography is built on.
+   */
+  dayOfYear = 268;
+  /** Lunar phase, 0 new .. 0.5 full .. 1 new. */
+  moonPhase = 0.42;
 
-  weather: WeatherState = { cloudCover: 0.35, rain: 0, wind: 3.5, windDirection: 0.8 };
+  weather: ResolvedWeather = {
+    cloudCover: 0.35,
+    rain: 0,
+    wind: 3.5,
+    windDirection: 0.8,
+    fog: 0,
+    snow: 0,
+    turbidity: 2.2,
+  };
 
-  /** Latitude-like tilt of the solar path. */
-  private readonly declination = 0.32;
+  private target: ResolvedWeather = { ...this.weather };
 
-  constructor(private readonly scene: Scene, viewDistance: number) {
+  constructor(private readonly scene: Scene, viewDistance: number, quality = 'high') {
+    installAerialPerspective();
+    this.clouds = new CloudLayer(quality);
+
     this.material = new ShaderMaterial({
       uniforms: {
+        uSkyView: { value: this.luts.skyView.texture },
+        uSkyViewTexel: { value: this.luts.skyViewTexel },
+        uClouds: { value: this.clouds.texture },
         uSunDir: { value: this.sunDirection },
+        uMoonDir: { value: this.moonDirection },
+        uSunTint: { value: this.sunTint },
+        uSunDisc: { value: new Vector3(20, 20, 20) },
+        uMoonTint: { value: new Vector3(1, 1, 1) },
+        uGalacticPole: { value: new Vector3(0.42, 0.62, -0.66).normalize() },
         uTime: { value: 0 },
-        uCloudCover: { value: this.weather.cloudCover },
-        uCloudSpeed: { value: 1 },
-        uHaze: { value: 1 },
-        uExposure: { value: 1 },
-        uWindDir: { value: new Vector3(1, 0, 0.3).normalize() },
+        uStars: { value: 0 },
+        uSunRadius: { value: 0.00465 },
+        uMoonRadius: { value: 0.0068 },
+        uCloudFade: { value: 1 },
+        uGroundFade: { value: 0.6 },
       },
       vertexShader: skyVertex,
       fragmentShader: skyFragment,
@@ -222,7 +319,7 @@ export class SkySystem {
       fog: false,
     });
 
-    const domeGeometry = new SphereGeometry(1, 48, 32);
+    const domeGeometry = new SphereGeometry(1, 32, 24);
     this.dome = new Mesh(domeGeometry, this.material);
     this.dome.frustumCulled = false;
     this.dome.renderOrder = -1000;
@@ -245,8 +342,15 @@ export class SkySystem {
     scene.add(this.hemi);
     scene.add(this.ambient);
 
-    this.fog = new FogExp2(0x9fb6cc, 0.0011);
+    this.fog = new FogExp2(0x9fb6cc, 0.00016);
     scene.fog = this.fog;
+
+    aerialUniforms.uAerialSkyLut.value = this.luts.skyView.texture;
+    (aerialUniforms.uAerialSkyTexel.value as Vector2).copy(this.luts.skyViewTexel);
+    (aerialUniforms.uAerialSunDir.value as Vector3).copy(this.sunDirection);
+
+    this.computeSun();
+    this.applyLighting(0);
   }
 
   /**
@@ -259,12 +363,12 @@ export class SkySystem {
       this.pmrem = new PMREMGenerator(renderer);
       this.pmrem.compileEquirectangularShader();
     }
-    if (!force && Math.abs(this.sunDirection.y - this.envSunY) < 0.02) return;
+    if (force) this.bake(renderer, true);
+    if (!force && Math.abs(this.sunDirection.y - this.envSunY) < 0.015) return;
     this.envSunY = this.sunDirection.y;
     const previous = this.envTarget;
     this.envTarget = this.pmrem.fromScene(this.envScene, 0.03, 1, 2000);
     this.scene.environment = this.envTarget.texture;
-    this.scene.environmentIntensity = 1.0;
     previous?.dispose();
   }
 
@@ -297,8 +401,9 @@ export class SkySystem {
 
   /** Lens glare strength for the post pass. */
   get glare(): number {
-    const low = smoothstep(0.35, 0.02, Math.abs(this.sunDirection.y));
-    return clamp01(low * (1 - this.weather.cloudCover * 0.8)) * 0.9;
+    const low = smoothstep(0.4, 0.02, Math.abs(this.sunDirection.y));
+    const clear = 1 - this.cloudShadow * 0.85;
+    return clamp01(low * clear * (1 - this.weather.cloudCover * 0.55)) * 0.9;
   }
 
   /** True when artificial lighting should be on. */
@@ -310,95 +415,323 @@ export class SkySystem {
     return 1 - smoothstep(-0.08, 0.10, this.sunDirection.y);
   }
 
-  setWeather(weather: Partial<WeatherState>): void {
-    this.weather = { ...this.weather, ...weather };
+  /** Zenith colour, for water and glass tinting. */
+  get zenith(): Color {
+    return this.zenithColor;
   }
 
-  update(dt: number, cameraPos: Vector3, biomeHaze: number, elapsed: number): void {
+  setWeather(weather: Partial<WeatherState>): void {
+    this.target = {
+      ...this.target,
+      ...weather,
+      fog: weather.fog ?? (weather.cloudCover !== undefined ? 0 : this.target.fog),
+      snow: weather.snow ?? (weather.cloudCover !== undefined ? 0 : this.target.snow),
+      turbidity:
+        weather.turbidity ??
+        (weather.cloudCover !== undefined
+          ? lerp(1.6, 4.2, weather.cloudCover ?? 0) + (weather.rain ?? 0) * 1.5
+          : this.target.turbidity),
+    };
+  }
+
+  /** Immediately snaps to the target weather, for scenario setup. */
+  settleWeather(): void {
+    this.weather = { ...this.target };
+  }
+
+  // --- astronomy -------------------------------------------------------------
+
+  private computeSun(): void {
+    const dayAngle = ((this.dayOfYear + 284) / 365.25) * Math.PI * 2;
+    const declination = Math.asin(Math.sin(AXIAL_TILT) * Math.sin(dayAngle));
+    const hourAngle = (this.timeOfDay / 3600 - 12) * 15 * DEG;
+    this.placeBody(this.sunDirection, declination, hourAngle);
+
+    // The moon lags the sun by a full turn over a lunation, so a full moon sits
+    // opposite the sun and rises as it sets, and a crescent hugs the twilight.
+    const moonHour = hourAngle - this.moonPhase * Math.PI * 2;
+    const moonLongitude = dayAngle + this.moonPhase * Math.PI * 2;
+    const moonDec = Math.asin(Math.sin(AXIAL_TILT * 0.92) * Math.sin(moonLongitude));
+    this.placeBody(this.moonDirection, moonDec, moonHour);
+  }
+
+  private placeBody(out: Vector3, declination: number, hourAngle: number): void {
+    const sinAlt =
+      Math.sin(LATITUDE) * Math.sin(declination) +
+      Math.cos(LATITUDE) * Math.cos(declination) * Math.cos(hourAngle);
+    const alt = Math.asin(clamp(sinAlt, -1, 1));
+    const cosAlt = Math.cos(alt);
+    let azimuth = Math.PI;
+    if (cosAlt > 1e-4) {
+      const cosAz = clamp(
+        (Math.sin(declination) - Math.sin(LATITUDE) * sinAlt) / (Math.cos(LATITUDE) * cosAlt),
+        -1,
+        1,
+      );
+      azimuth = Math.acos(cosAz);
+      if (Math.sin(hourAngle) > 0) azimuth = Math.PI * 2 - azimuth;
+    }
+    // Azimuth is measured from north through east; the world's +X is east.
+    out.set(Math.sin(azimuth) * cosAlt, Math.sin(alt), -Math.cos(azimuth) * cosAlt).normalize();
+  }
+
+  // --- per frame -------------------------------------------------------------
+
+  private bake(renderer: WebGLRenderer, force = false): void {
+    const w = this.weather;
+    this.luts.update(
+      renderer,
+      this.sunDirection,
+      w.turbidity,
+      0.15,
+      Math.max(this.cameraY, 0) * 0.001,
+      this.exposure,
+      force,
+    );
+    // After sunset the deck is lit by the moon instead, which is a thousand
+    // times weaker and comes from somewhere else entirely.
+    const night = this.nightFactor;
+    const illum = 0.5 - 0.5 * Math.cos(this.moonPhase * Math.PI * 2);
+    const moonUp = smoothstep(-0.05, 0.12, this.moonDirection.y);
+    this.keyDirection.copy(this.sunDirection).lerp(this.moonDirection, night).normalize();
+    this.keyColor
+      .set(this.sunTransmittance.r, this.sunTransmittance.g, this.sunTransmittance.b)
+      .multiplyScalar(4.6 * this.exposure * (1 - night));
+    this.keyColor.x += 0.016 * night * illum * moonUp;
+    this.keyColor.y += 0.019 * night * illum * moonUp;
+    this.keyColor.z += 0.027 * night * illum * moonUp;
+
+    this.clouds.setEnvironment(
+      this.luts.skyView,
+      this.luts.skyViewTexel,
+      this.sunDirection,
+      this.keyDirection,
+      this.keyColor,
+      this.sunTint,
+      this.groundBounce,
+      this.cameraY,
+      night,
+    );
+    this.clouds.render(renderer, force);
+  }
+
+  update(
+    renderer: WebGLRenderer,
+    dt: number,
+    cameraPos: Vector3,
+    biomeHaze: number,
+    elapsed: number,
+  ): void {
     this.timeOfDay = (this.timeOfDay + dt * this.timeScale) % 86400;
+    this.cameraY = cameraPos.y;
 
-    // Solar position: a simple tilted circle, good enough for a rolling sky.
-    const dayAngle = ((this.timeOfDay / 86400) * Math.PI * 2) - Math.PI / 2;
-    const alt = Math.sin(dayAngle) * (1 - this.declination * 0.35) + this.declination * 0.12;
-    const az = dayAngle * 0.55 + 0.9;
-    const horiz = Math.sqrt(Math.max(0, 1 - alt * alt));
-    this.sunDirection.set(Math.cos(az) * horiz, alt, Math.sin(az) * horiz).normalize();
+    // Weather crossfades rather than snapping; a front takes a few seconds to
+    // come through instead of appearing between one frame and the next. The
+    // blend runs on wall time, not on the simulation step, so a slow machine
+    // gets the same transition rather than a much longer one.
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const wallDt = this.lastWall > 0 ? Math.min(0.5, (now - this.lastWall) / 1000) : dt;
+    this.lastWall = now;
+    const k = 1 - Math.exp(-wallDt * 1.1);
+    const w = this.weather;
+    const t = this.target;
+    w.cloudCover = lerp(w.cloudCover, t.cloudCover, k);
+    w.rain = lerp(w.rain, t.rain, k);
+    w.wind = lerp(w.wind, t.wind, k);
+    w.windDirection = lerp(w.windDirection, t.windDirection, k);
+    w.fog = lerp(w.fog, t.fog, k);
+    w.snow = lerp(w.snow, t.snow, k);
+    w.turbidity = lerp(w.turbidity, t.turbidity, k);
 
+    this.computeSun();
+    Object.assign(this.clouds.settings, cloudLook(w), { coverage: w.cloudCover });
+    this.clouds.setWeather(
+      dt,
+      Math.cos(w.windDirection),
+      Math.sin(w.windDirection),
+      1 + w.wind * 0.35,
+    );
+    this.cloudShadow = this.clouds.sunOcclusion(cameraPos.x, cameraPos.z, this.sunDirection);
+
+    this.applyLighting(elapsed);
+    this.bake(renderer);
+
+    this.dome.position.copy(cameraPos);
+    this.sun.position.copy(cameraPos).addScaledVector(this.sunDirection, 260);
+    this.sun.target.position.copy(cameraPos);
+    this.sun.target.updateMatrixWorld();
+    this.moon.position.copy(cameraPos).addScaledVector(this.moonDirection, 260);
+    this.moon.target.position.copy(cameraPos);
+    this.moon.target.updateMatrixWorld();
+
+    this.updateAerial(biomeHaze);
+  }
+
+  private applyLighting(elapsed: number): void {
+    const w = this.weather;
     const e = this.sunDirection.y;
     const day = smoothstep(-0.08, 0.16, e);
     const dusk = Math.exp(-Math.pow((e - 0.02) / 0.12, 2));
     const night = this.nightFactor;
-    const overcast = this.weather.cloudCover;
 
-    // Sun light: warm and weak at the horizon, neutral and strong at noon.
-    // Kept well above the sky bounce so shadows read as shadows.
-    const sunIntensity = lerp(0.0, 4.5, smoothstep(-0.05, 0.28, e)) * lerp(1, 0.20, overcast);
-    this.sun.intensity = sunIntensity;
-    this.sun.color.setRGB(
-      lerp(1.0, 1.0, day),
-      lerp(0.56, 0.96, smoothstep(-0.02, 0.24, e)),
-      lerp(0.26, 0.90, smoothstep(-0.02, 0.30, e)),
+    // The eye opens as the sun goes down. Without this a physically scaled sky
+    // renders golden hour as blue hour and blue hour as night: one factor,
+    // applied to the table and to every light that comes off it, so the whole
+    // image adapts together instead of drifting apart.
+    this.exposure = lerp(1.95, 1.0, smoothstep(-0.02, 0.42, e));
+
+    transmittance(this.sunTransmittance, Math.max(this.cameraY, 0) * 0.001, e, w.turbidity);
+    const lum =
+      this.sunTransmittance.r * 0.2126 +
+      this.sunTransmittance.g * 0.7152 +
+      this.sunTransmittance.b * 0.0722;
+
+    const maxComponent = Math.max(
+      this.sunTransmittance.r,
+      Math.max(this.sunTransmittance.g, this.sunTransmittance.b),
+      1e-4,
+    );
+    this.sunTint.set(
+      this.sunTransmittance.r / maxComponent,
+      this.sunTransmittance.g / maxComponent,
+      this.sunTransmittance.b / maxComponent,
     );
 
-    this.moon.intensity = night * 0.28 * lerp(1, 0.4, overcast);
-    this.moon.color.setRGB(0.55, 0.63, 0.9);
+    // A cumulus drifting across the sun dims and cools the whole landscape.
+    const cloudBlock = clamp01(
+      Math.max(this.cloudShadow * 0.55, smoothstep(0.55, 0.98, w.cloudCover)),
+    );
+    const sunThrough = lerp(1, 0.12, cloudBlock) * lerp(1, 0.5, w.fog);
+    const above = smoothstep(-0.03, 0.10, e);
 
-    // Sky bounce. The prefiltered environment map already provides most of the
-    // indirect light, so this is only a gentle fill.
-    // Enough sky bounce that a hillside shadow still shows what is in it: with
-    // only the environment map filling them, shadows read as holes.
-    const hemiIntensity = lerp(0.05, 0.24, day) * lerp(1, 2.2, overcast) + night * 0.03;
-    this.hemi.intensity = hemiIntensity;
+    this.sun.intensity = 6.2 * Math.pow(lum, 0.55) * above * sunThrough * this.exposure;
+    this.sun.color.setRGB(
+      this.sunTransmittance.r / Math.max(lum, 1e-4),
+      this.sunTransmittance.g / Math.max(lum, 1e-4),
+      this.sunTransmittance.b / Math.max(lum, 1e-4),
+    );
+
+    // Moon light, with the phase actually controlling how much there is.
+    const illum = 0.5 - 0.5 * Math.cos(this.moonPhase * Math.PI * 2);
+    this.moon.intensity =
+      night * 0.62 * illum * smoothstep(-0.04, 0.12, this.moonDirection.y) *
+      lerp(1, 0.25, cloudBlock) * this.exposure;
+    this.moon.color.setRGB(0.58, 0.66, 0.92);
+
+    // Sky bounce. The environment map carries most of the indirect light, so
+    // this is a gentle fill that keeps shadows readable.
+    const overcast = w.cloudCover;
+    const moonlit = night * illum * smoothstep(-0.04, 0.14, this.moonDirection.y);
+    this.hemi.intensity =
+      lerp(0.05, 0.26, day) * lerp(1, 2.1, overcast) + night * 0.02 + moonlit * 0.075;
     this.hemi.color.setRGB(
-      lerp(0.05, 0.55, day) + dusk * 0.25,
-      lerp(0.07, 0.72, day) + dusk * 0.10,
+      lerp(0.05, 0.48, day) + dusk * 0.30,
+      lerp(0.07, 0.66, day) + dusk * 0.12,
       lerp(0.16, 1.0, day),
     );
     this.hemi.groundColor.setRGB(
-      lerp(0.03, 0.28, day),
       lerp(0.03, 0.26, day),
-      lerp(0.04, 0.20, day),
+      lerp(0.03, 0.24, day),
+      lerp(0.04, 0.19, day),
     );
-    this.ambient.intensity = lerp(0.03, 0.07, day) + overcast * 0.04;
+    this.ambient.intensity = lerp(0.02, 0.06, day) + overcast * 0.04 + moonlit * 0.02;
 
-    // Keep the sun rig centred on the camera so shadows follow the train.
-    const dist = 260;
-    this.sun.position.copy(cameraPos).addScaledVector(this.sunDirection, dist);
-    this.sun.target.position.copy(cameraPos);
-    this.sun.target.updateMatrixWorld();
-    this.moon.position.copy(cameraPos).addScaledVector(this.sunDirection, -dist);
-    this.moon.target.position.copy(cameraPos);
-    this.moon.target.updateMatrixWorld();
-    this.dome.position.copy(cameraPos);
+    // Colours other systems read: the horizon for fog and water, the zenith
+    // for glass. Both follow the transmittance rather than a fixed palette.
+    const zenithDay = new Color(0.10, 0.24, 0.62);
+    const nightSky = new Color(0.012, 0.02, 0.05);
+    this.zenithColor.copy(nightSky).lerp(zenithDay, day);
+    this.scratch.setRGB(
+      this.sunTransmittance.r,
+      this.sunTransmittance.g * 0.85,
+      this.sunTransmittance.b * 0.7,
+    );
+    const horizonDay = new Color(0.60, 0.72, 0.88);
+    this.horizonColor.copy(nightSky).lerp(horizonDay, day);
+    this.horizonColor.lerp(this.scratch, dusk * 0.7 * (1 - overcast * 0.4));
+    if (overcast > 0) this.horizonColor.lerp(new Color(0.5, 0.53, 0.58), overcast * 0.5);
 
-    // Fog colour tracks the horizon so distant land dissolves into the sky.
-    const dayFog = new Color(0.62, 0.735, 0.885);
-    const duskFog = new Color(0.86, 0.52, 0.36);
-    const nightFog = new Color(0.035, 0.05, 0.085);
-    this.horizonColor.copy(nightFog).lerp(dayFog, day).lerp(duskFog, dusk * 0.75);
-    if (overcast > 0) this.horizonColor.lerp(new Color(0.55, 0.58, 0.62), overcast * 0.55);
+    this.groundBounce.set(
+      this.horizonColor.r * 0.24,
+      this.horizonColor.g * 0.23,
+      this.horizonColor.b * 0.20,
+    );
+
+    // Environment intensity: image based lighting tracks the daylight.
+    this.scene.environmentIntensity =
+      (lerp(0.30, 1.55, day) * lerp(1, 1.25, overcast) + dusk * 0.08 + moonlit * 0.9) *
+      this.exposure;
+
+    // Dome uniforms.
+    const u = this.material.uniforms;
+    u.uTime.value = elapsed;
+    // Stars only once the sun is properly down; a physically dim golden-hour
+    // sky would otherwise let them through.
+    u.uStars.value = smoothstep(0.03, -0.05, e) * this.exposure;
+    (u.uSunDisc.value as Vector3).set(
+      this.sunTransmittance.r,
+      this.sunTransmittance.g,
+      this.sunTransmittance.b,
+    ).multiplyScalar(46 * this.exposure);
+    (u.uMoonTint.value as Vector3).set(1, 1, 1).multiplyScalar(lerp(0.35, 1, illum));
+    u.uGroundFade.value = lerp(0.55, 0.8, overcast);
+    u.uCloudFade.value = 1;
+  }
+
+  private updateAerial(biomeHaze: number): void {
+    const w = this.weather;
+    const haze = clamp(biomeHaze, 0.6, 1.6);
+    // One number sets how far you can see: clean air, summer murk, a rain
+    // squall and a valley fog bank are the same model at different densities.
+    const density =
+      (0.00017 + w.turbidity * 0.00006) * haze +
+      w.rain * 0.00075 +
+      w.fog * 0.0021 +
+      w.snow * 0.0004;
+    this.fog.density = density;
     this.fog.color.copy(this.horizonColor);
-    this.scene.background = null;
 
-    const rainHaze = this.weather.rain * 0.0016;
-    this.fog.density = (0.00055 + overcast * 0.00035) * clamp(biomeHaze, 0.6, 1.6) + rainHaze;
-
-    this.material.uniforms.uTime.value = elapsed;
-    this.material.uniforms.uCloudCover.value = overcast;
-    this.material.uniforms.uHaze.value = clamp(biomeHaze, 0.6, 1.6);
-    this.material.uniforms.uCloudSpeed.value = 0.4 + this.weather.wind * 0.12;
-    this.material.uniforms.uWindDir.value.set(
-      Math.cos(this.weather.windDirection),
-      0,
-      Math.sin(this.weather.windDirection),
+    aerialUniforms.uAerialSkyLut.value = this.luts.skyView.texture;
+    (aerialUniforms.uAerialSkyTexel.value as Vector2).copy(this.luts.skyViewTexel);
+    (aerialUniforms.uAerialSunDir.value as Vector3).copy(this.sunDirection);
+    (aerialUniforms.uAerialSunTint.value as Vector3).copy(this.sunTint);
+    aerialUniforms.uAerialCameraY.value = this.cameraY;
+    // Fog banks hug the ground; clean air reaches much higher.
+    aerialUniforms.uAerialHeightScale.value = lerp(1400, 220, clamp01(w.fog));
+    aerialUniforms.uAerialStrength.value = 1;
+    aerialUniforms.uAerialGround.value = lerp(0.55, 0.85, w.cloudCover);
+    // Rain and fog wash the colour out of the haze.
+    const grey = clamp01(w.rain * 0.5 + w.fog * 0.75);
+    (aerialUniforms.uAerialTint.value as Vector3).set(
+      lerp(1, 1.08, grey),
+      lerp(1, 1.06, grey),
+      lerp(1, 1.02, grey),
     );
-    this.material.uniforms.uExposure.value = lerp(0.9, 1.0, day);
-    // Image based lighting carries the ambient term, so it tracks the daylight.
-    this.scene.environmentIntensity = lerp(0.10, 0.46, day) * lerp(1, 1.5, overcast) + dusk * 0.08;
+
+    this.scene.background = null;
   }
 
   /** Colour of the ambient sky light, used to tint water and windows. */
   get horizon(): Color {
     return this.horizonColor;
+  }
+
+  /** The shared aerial perspective uniforms, exposed for debugging. */
+  get aerial(): typeof aerialUniforms {
+    return aerialUniforms;
+  }
+
+  /** How much of the sun a cloud is currently taking away, 0..1. */
+  get sunOcclusion(): number {
+    return this.cloudShadow;
+  }
+
+  dispose(): void {
+    this.luts.dispose();
+    this.clouds.dispose();
+    this.material.dispose();
+    this.dome.geometry.dispose();
+    this.envTarget?.dispose();
+    this.pmrem?.dispose();
   }
 }

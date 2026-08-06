@@ -119,7 +119,9 @@ export class World {
     }
 
     this.tiles.refresh(cameraPos.x, cameraPos.z);
-    this.tiles.processQueue(buildBudgetMs * 0.8);
+    // Ground first: a chunk arriving late costs a few trees, a tile arriving
+    // late is a hole in the world.
+    this.tiles.processQueue(buildBudgetMs);
 
     this.sea.setVisible(this.coastNearby());
     if (this.sea.mesh.visible) this.sea.update(cameraPos.x, cameraPos.z);

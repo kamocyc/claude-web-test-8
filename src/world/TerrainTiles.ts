@@ -6,9 +6,9 @@ import {
   type Material,
   Vector3,
 } from 'three';
-import { blendedGrassColor, SEA_LEVEL } from './Biome';
+import { blendedGrassColor } from './Biome';
 import { TerrainField } from './TerrainField';
-import { clamp01, smoothstep } from '../core/MathUtils';
+import { clamp01 } from '../core/MathUtils';
 import type { ProjectionResult } from './TerrainField';
 
 /**
@@ -27,14 +27,21 @@ interface TileLevel {
   radius: number;
 }
 
+// Ring sizes are a budget as much as a quality setting: a tile of the finest
+// level costs as many height samples as one of the coarsest and covers a
+// two-hundred-and-fiftieth of the ground, so the fine rings are kept tight and
+// the coarse ones carry the distance.
 const LEVELS: TileLevel[] = [
-  { size: 128, segments: 32, radius: 3 },
-  { size: 256, segments: 32, radius: 3 },
-  { size: 512, segments: 28, radius: 3 },
-  { size: 1024, segments: 20, radius: 3 },
+  // The finest ring is almost entirely hidden under the track-space corridor
+  // mesh, so its resolution buys very little; the material carries the close
+  // detail now, not the mesh.
+  { size: 128, segments: 24, radius: 2 },
+  { size: 256, segments: 24, radius: 3 },
+  { size: 512, segments: 24, radius: 2 },
+  { size: 1024, segments: 20, radius: 2 },
   // Coarse enough and a distant ridge turns into a row of facets against the
   // sky, which is the first thing that gives a generated landscape away.
-  { size: 2048, segments: 16, radius: 3 },
+  { size: 2048, segments: 16, radius: 2 },
 ];
 
 interface Tile {
@@ -137,12 +144,21 @@ export class TerrainTiles {
     for (let i = this.pending.length - 1; i >= 0; i--) {
       if (!wanted.has(this.pending[i].key)) this.pending.splice(i, 1);
     }
-    this.pending.sort((a, b) => b.priority - a.priority); // build nearest last-in/first-out
+    // Build nearest first, but with a large head start for the coarse levels:
+    // one 2 km tile covers as much ground as sixteen thousand of the finest
+    // ones for a twentieth of the samples, and a hole at the horizon is not a
+    // low-detail patch, it is a window through the world to the sky.
+    const key = (t: { priority: number; level: number }) => t.priority - t.level * 900;
+    this.pending.sort((a, b) => key(b) - key(a)); // last-in/first-out
   }
 
   /** Builds queued tiles until the time budget for this frame is used up. */
   processQueue(budgetMs: number): number {
-    const deadline = performance.now() + budgetMs;
+    // A deep backlog means the world is being filled from nothing - the start
+    // of a run, or after the view jumped somewhere else entirely. A few long
+    // frames while that is closed are worth far less than holes in the ground,
+    // so the budget is raised until the queue is back to a trickle.
+    const deadline = performance.now() + (this.pending.length > 40 ? budgetMs * 2.5 : budgetMs);
     let built = 0;
     while (this.pending.length > 0 && performance.now() < deadline) {
       const job = this.pending.pop()!;
@@ -176,26 +192,45 @@ export class TerrainTiles {
     const shore = new Float32Array(n * n);
     const colors = new Float32Array(n * n * 3);
     this.projection.hint = -1;
+    const tint = this.field.noise.patches;
+    // Projecting onto the centre line is the expensive part of building a
+    // tile, and the search only has to reach as far as one cell of this tile
+    // can move along the line. A coarse tile needs a wide window; the fine
+    // ones nearest the camera - which are most of the samples - need very
+    // little, so this is worth several milliseconds a tile.
+    const window = Math.max(8, Math.min(48, Math.round(step * 0.5) + 6));
+    let tintHint = -2;
+    let tintR = 1;
+    let tintG = 1;
+    let tintB = 1;
 
     for (let j = 0; j < n; j++) {
       const z = originZ + (j - 1) * step;
       for (let i = 0; i < n; i++) {
         const x = originX + (i - 1) * step;
-        const proj = this.field.project(x, z, this.projection.hint, this.projection);
+        const proj = this.field.project(x, z, this.projection.hint, this.projection, window);
         const sample = this.field.sampleAt(proj.s);
         const y = this.field.ground(sample, proj.lateral, x, z, true);
         const idx = j * n + i;
         heights[idx] = y;
-        shore[idx] = clamp01(
-          (1 - smoothstep(0.4, 3.4, y - SEA_LEVEL)) * smoothstep(-2.5, 0.4, y - SEA_LEVEL) * 1.15 +
-            (y < SEA_LEVEL ? 0.85 : 0),
-        );
-        const col = blendedGrassColor(sample.weights);
+        shore[idx] = this.field.shoreFactor(sample, proj.lateral, y);
+        // The tint only changes with the biome blend, which moves along the
+        // line, not across it - so it is recomputed when the projection lands
+        // on a different stored sample and reused otherwise.
+        if (proj.hint !== tintHint) {
+          tintHint = proj.hint;
+          const col = blendedGrassColor(sample.weights);
+          tintR = col.r;
+          tintG = col.g;
+          tintB = col.b;
+        }
         // Large-scale colour variation so fields do not read as a flat wash.
-        const tint = 0.78 + this.field.noise.patches.fbm(x * 0.0016, z * 0.0016, 3) * 0.5;
-        colors[idx * 3] = col.r * tint;
-        colors[idx * 3 + 1] = col.g * tint;
-        colors[idx * 3 + 2] = col.b * tint;
+        // The material carries its own drift as well; this one is coarser and
+        // keeps neighbouring tiles from ever matching exactly.
+        const wash = 0.88 + tint.fbm(x * 0.0016, z * 0.0016, 2) * 0.28;
+        colors[idx * 3] = tintR * wash;
+        colors[idx * 3 + 1] = tintG * wash;
+        colors[idx * 3 + 2] = tintB * wash;
       }
     }
 
@@ -209,6 +244,7 @@ export class TerrainTiles {
     const vcolors = new Float32Array(total * 3);
     const slopes = new Float32Array(total);
     const shores = new Float32Array(total);
+    const cavities = new Float32Array(total);
 
     const normal = new Vector3();
     const at = (i: number, j: number) => heights[(j + 1) * n + (i + 1)];
@@ -239,6 +275,14 @@ export class TerrainTiles {
         vcolors[vi * 3 + 2] = colors[idx * 3 + 2];
         slopes[vi] = clamp01(1 - normal.y);
         shores[vi] = shore[idx];
+
+        // Curvature, as the discrete Laplacian of the height field. Positive
+        // in a hollow, negative on a crest. The material darkens the hollows
+        // and gathers scree and loose stone in them, which is most of what
+        // reads as ambient occlusion on open ground - for the cost of four
+        // samples we already had.
+        const lap = (at(i - 1, j) + at(i + 1, j) + at(i, j - 1) + at(i, j + 1)) * 0.25 - y;
+        cavities[vi] = Math.max(-1, Math.min(1, lap / (step * 0.22)));
       }
     }
 
@@ -274,6 +318,7 @@ export class TerrainTiles {
       vcolors[v * 3 + 2] = vcolors[src * 3 + 2];
       slopes[v] = slopes[src];
       shores[v] = shores[src];
+      cavities[v] = cavities[src];
       return v;
     };
 
@@ -313,6 +358,7 @@ export class TerrainTiles {
     geometry.setAttribute('color', new BufferAttribute(vcolors, 3));
     geometry.setAttribute('aSlope', new BufferAttribute(slopes, 1));
     geometry.setAttribute('aShore', new BufferAttribute(shores, 1));
+    geometry.setAttribute('aCavity', new BufferAttribute(cavities, 1));
     geometry.setIndex(indices);
     geometry.computeBoundingSphere();
 
