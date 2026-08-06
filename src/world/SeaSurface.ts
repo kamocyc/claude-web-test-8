@@ -53,6 +53,10 @@ export class SeaSurface {
       }
     }
 
+    // Wound anticlockwise seen from above, which is the only way up a surface
+    // nobody ever looks at from underneath can be. Taken round the other way
+    // the whole sea faces the sea bed, and back face culling then removes it
+    // from every camera in the game - a coast with no water on it.
     const indices: number[] = [];
     for (let k = 0; k < this.rings; k++) {
       for (let a = 0; a < this.sectors; a++) {
@@ -61,7 +65,7 @@ export class SeaSurface {
         const i1 = k * this.sectors + a1;
         const i2 = (k + 1) * this.sectors + a;
         const i3 = (k + 1) * this.sectors + a1;
-        indices.push(i0, i2, i1, i1, i2, i3);
+        indices.push(i0, i1, i2, i1, i3, i2);
       }
     }
 

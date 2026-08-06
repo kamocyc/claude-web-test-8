@@ -148,6 +148,22 @@ export class Menu {
     volume.appendChild(range);
     this.actions.appendChild(volume);
 
+    // Camera shake, all the way down to nothing: the vibration is part of what
+    // makes the cab feel like a cab, and also the first thing to turn off if it
+    // makes you ill or you are trying to line up a shot.
+    const shake = field(t('menu.shake'));
+    const shakeRange = document.createElement('input');
+    shakeRange.type = 'range';
+    shakeRange.min = '0';
+    shakeRange.max = '100';
+    shakeRange.value = String(Math.round(this.settings.shake * 100));
+    shakeRange.addEventListener('input', () => {
+      this.settings = { ...this.settings, shake: Number(shakeRange.value) / 100 };
+      this.callbacks.onSettingsChanged(this.settings);
+    });
+    shake.appendChild(shakeRange);
+    this.actions.appendChild(shake);
+
     const aid = field(t('menu.assist'));
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';

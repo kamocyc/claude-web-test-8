@@ -55,6 +55,10 @@ controller with it — traction is cut electrically instead.
 | Mouse drag | Look around |
 | Right-button drag | Slide the view sideways |
 
+Camera shake is a slider in the menu and goes all the way down to nothing. The
+lineside camera never shakes whatever it is set to: it is a tripod in a field,
+not something riding on the train.
+
 The job is the same as a real driver's: run at or below the permitted speed,
 stop with the cab against the stopping marker at the far end of each platform,
 and arrive on the minute. Score comes from stopping accuracy and punctuality;

@@ -122,7 +122,11 @@ export class CameraRig {
     }
     this.jointImpulse = damp(this.jointImpulse, 0, 9, dt);
 
-    const intensity = smoothstep(0, 28, speed) * this.shake;
+    // The lineside camera is a tripod in a field. Whatever the train is doing
+    // to itself is no business of a camera that is not on it, so that shot is
+    // steady however hard the rest of the game is shaking.
+    const carried = this.mode === 'lineside' ? 0 : this.shake;
+    const intensity = smoothstep(0, 28, speed) * carried;
     this.swayX =
       (Math.sin(elapsed * 1.9) * 0.011 + Math.sin(elapsed * 4.7 + 1.3) * 0.005) * intensity;
     this.swayY =

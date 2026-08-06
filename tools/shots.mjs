@@ -45,6 +45,11 @@ const SCENARIOS = [
   { id: 'window-day', seed: 4242, time: 10.5, cam: 'window', biome: null, weather: { cloudCover: 0.35, rain: 0 } },
   { id: 'roof-day', seed: 4242, time: 10.5, cam: 'roof', biome: null, weather: { cloudCover: 0.35, rain: 0 } },
   { id: 'coast', seed: 4242, time: 15.0, cam: 'chase', biome: 'coast', weather: { cloudCover: 0.3, rain: 0 } },
+  // The coast is the one landscape whose whole point is off to one side, so a
+  // camera pointed down the train never sees it. This one turns to face the
+  // water - which is how the sea being invisible went unnoticed for so long.
+  { id: 'coast-sea', seed: 4242, time: 15.0, cam: 'roof', biome: 'coast', seaward: true,
+    weather: { cloudCover: 0.3, rain: 0 } },
   { id: 'mountain', seed: 4242, time: 11.0, cam: 'chase', biome: 'mountain', weather: { cloudCover: 0.4, rain: 0 } },
   { id: 'city', seed: 4242, time: 18.6, cam: 'chase', biome: 'city', weather: { cloudCover: 0.4, rain: 0 } },
   { id: 'farmland', seed: 4242, time: 9.0, cam: 'chase', biome: 'farmland', weather: { cloudCover: 0.25, rain: 0 } },
@@ -159,11 +164,16 @@ for (const sc of scenarios) {
   }
 
   await page.evaluate(
-    ([cam, weather]) => {
+    ([cam, weather, seaward]) => {
       window.game.camera.setMode(cam);
       window.game.sky.setWeather(weather);
+      if (seaward) {
+        // Whichever side the water is on here, look at it.
+        const side = window.game.world.track.sampleAt(window.game.train.position).seaSide || -1;
+        window.game.camera.look(side * -1.25, -0.12);
+      }
     },
-    [sc.cam, sc.weather],
+    [sc.cam, sc.weather, !!sc.seaward],
   );
   await page.waitForTimeout(wait(9000));
 
