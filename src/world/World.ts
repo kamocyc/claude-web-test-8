@@ -198,9 +198,12 @@ export class World {
         const rate = dt / 5.5;
         crossing.state += Math.sign(target - crossing.state) * Math.min(rate, Math.abs(target - crossing.state));
 
+        // The arm lies along the line, across the carriageway, so it lifts by
+        // turning about the track's lateral axis - not about the vertical one,
+        // which would swing it sideways over the running line instead.
         for (const barrier of crossing.barriers) {
           const side = (barrier.userData.side as number) ?? 1;
-          barrier.rotation.z = -side * Math.PI * 0.5 * (1 - crossing.state);
+          barrier.rotation.x = -side * Math.PI * 0.5 * (1 - crossing.state);
         }
 
         const flash = active && Math.sin(elapsed * 7.5) > 0;

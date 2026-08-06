@@ -7,6 +7,7 @@ import {
   coniferCrown,
   coniferMaterial,
   concreteMaterial,
+  corrugatedMaterial,
   crossCards,
   facadeMaterial,
   gableRoof,
@@ -282,19 +283,38 @@ export function buildGroundCover(ctx: ChunkContext): void {
   if (mesh) ctx.group.add(mesh);
 }
 
-type BuildingKind = 'house' | 'farmhouse' | 'shophouse' | 'block' | 'tower' | 'warehouse';
+type BuildingKind =
+  | 'house'
+  | 'farmhouse'
+  | 'shophouse'
+  | 'apartment'
+  | 'block'
+  | 'tower'
+  | 'warehouse';
 
 /** Plan dimensions and how much fall a plot of each kind will tolerate. */
 const KIND_SITE: Record<BuildingKind, { plot: number; fall: number }> = {
-  house: { plot: 2.6, fall: 2.4 },
-  farmhouse: { plot: 3.4, fall: 2.4 },
+  house: { plot: 3.4, fall: 2.4 },
+  farmhouse: { plot: 4.6, fall: 2.4 },
   shophouse: { plot: 1.6, fall: 2.0 },
+  apartment: { plot: 3.4, fall: 2.4 },
   block: { plot: 3.0, fall: 2.6 },
   tower: { plot: 5.0, fall: 2.6 },
   warehouse: { plot: 3.0, fall: 1.8 },
 };
 
-/** Towns, villages and industrial estates. */
+/**
+ * Towns, villages and industrial estates.
+ *
+ * The shapes are the ones that actually line a Japanese railway: two storey
+ * houses with deep eaves, a first floor balcony hung with a drying rail and a
+ * concrete block wall round the plot; walk-up flats with the access balcony
+ * open to the air along one side and the private balconies down the other;
+ * shophouses with an awning over the pavement and a signboard up the corner;
+ * sheds in ribbed steel; and, in the middle of a city, towers that step back
+ * as they rise. Each one is assembled from instanced boxes, so a street of
+ * fifty of them still costs a handful of draw calls.
+ */
 export function buildBuildings(ctx: ChunkContext): void {
   const bodies = new Map<string, InstanceCollector>();
   const roofs = new InstanceCollector();
@@ -332,7 +352,7 @@ export function buildBuildings(ctx: ChunkContext): void {
     if (!ctx.rng.chance(clamp01(density * (0.25 + cluster * 1.15)) * 0.8)) continue;
 
     const biomeId = dominantBiome(p.sample.weights);
-    const kind = pickBuildingKind(ctx, biomeId, density, cluster);
+    const kind = pickBuildingKind(ctx, biomeId, cluster);
     const plan = planBuilding(ctx, kind);
     const site = KIND_SITE[kind];
 
@@ -365,48 +385,80 @@ export function buildBuildings(ctx: ChunkContext): void {
     const plinth = baseY - (low - 0.6);
     scale.set(plan.w + 0.55, plinth, plan.d + 0.55);
     groundMatrix(p.x, low - 0.6, p.z, yaw, matrix, scale);
-    collector('concrete').push(matrix, new Color(0.63, 0.62, 0.59));
+    collector('concrete').push(matrix, CONCRETE);
 
-    const put = (w: number, h: number, d: number, y: number, key: string, c: Color): Matrix4 => {
+    /**
+     * A box in the building's own frame: `oy` is the height of its underside
+     * above the ground floor, `ox` and `oz` offsets across and along the plan.
+     */
+    const box = (
+      key: string, c: Color,
+      w: number, h: number, d: number,
+      ox = 0, oy = 0, oz = 0,
+    ): void => {
       scale.set(w, h, d);
-      groundMatrix(p.x, baseY + y, p.z, yaw, matrix, scale);
+      groundMatrix(p.x, baseY + oy, p.z, yaw, matrix, scale);
+      matrix.multiply(new Matrix4().makeTranslation(ox / w, 0, oz / d));
       collector(key).push(matrix, c);
-      return matrix;
+    };
+    /** A pitched roof over the plan, `spread` metres wider than the walls. */
+    const roof = (
+      hipped: boolean, c: Color,
+      w: number, d: number, rise: number, spread: number, oy: number,
+    ): void => {
+      scale.set(w + spread, rise, d + spread);
+      groundMatrix(p.x, baseY + oy, p.z, yaw, matrix, scale);
+      (hipped ? hipRoofs : roofs).push(matrix, c);
     };
 
     switch (kind) {
       case 'house': {
         const { w, d, h } = plan;
+        const storeys = h > 4.5 ? 2 : 1;
         color.setHSL(ctx.rng.range(0.06, 0.15), ctx.rng.range(0.03, 0.16), ctx.rng.range(0.62, 0.88));
-        put(w, h, d, 0, 'siding', color);
-        scale.set(w + 0.9, ctx.rng.range(1.5, 2.4), d + 0.9);
-        groundMatrix(p.x, baseY + h, p.z, yaw, matrix, scale);
-        color.setHSL(ctx.rng.range(0.55, 0.65), ctx.rng.range(0.06, 0.3), ctx.rng.range(0.2, 0.42));
-        roofs.push(matrix, color);
-        // Entrance canopy, a balcony on the upper floor, and the block wall
-        // that surrounds every Japanese plot.
-        scale.set(w * 0.42, 0.16, 1.5);
-        groundMatrix(p.x, baseY + 2.25, p.z, yaw, matrix, scale);
-        matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.6) / 1.5));
-        collector('concrete').push(matrix, new Color(0.62, 0.6, 0.57));
-        if (h > 4.5) {
-          scale.set(w * 0.8, 1.05, 0.12);
-          groundMatrix(p.x, baseY + h * 0.52, p.z, yaw, matrix, scale);
-          matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.06) / 0.12));
-          collector('concrete').push(matrix, new Color(0.78, 0.77, 0.74));
+        box('siding', color, w, h, d);
+        // Deep eaves: a Japanese roof oversails by the better part of a metre
+        // to keep the rain off the walls, and that shadow line is most of what
+        // makes the house read as Japanese.
+        roof(
+          ctx.rng.chance(0.45), ROOF_TILE.clone().offsetHSL(0, 0, ctx.rng.range(-0.06, 0.06)),
+          w, d, ctx.rng.range(1.6, 2.4), 1.7, h,
+        );
+        // Entrance porch on the long side, with its own small canopy.
+        box('concrete', CONCRETE, w * 0.34, 0.18, 1.5, 0, 2.35, d * 0.5 + 0.55);
+        box('siding', color, 1.2, 2.2, 0.14, w * 0.2, 0, d * 0.5 + 0.04);
+        if (storeys === 2) {
+          // First floor balcony: slab, solid panel front, and the drying rail
+          // above it that every Japanese balcony has.
+          const bw = w * 0.78;
+          box('concrete', CONCRETE, bw, 0.14, 1.35, 0, h * 0.5, d * 0.5 + 0.6);
+          box('metal', BALCONY, bw, 1.05, 0.1, 0, h * 0.5 + 0.14, d * 0.5 + 1.22);
+          box('metal', BALCONY, 0.1, 1.05, 1.35, -bw * 0.5, h * 0.5 + 0.14, d * 0.5 + 0.6);
+          box('metal', BALCONY, 0.1, 1.05, 1.35, bw * 0.5, h * 0.5 + 0.14, d * 0.5 + 0.6);
+          box('metal', RAIL, bw * 0.9, 0.05, 0.05, 0, h * 0.5 + 1.35, d * 0.5 + 1.0);
         }
-        if (ctx.rng.chance(0.7)) {
-          const wallColor = new Color(0.7, 0.69, 0.65);
-          const hw = w * 0.5 + 2.0;
-          const hd = d * 0.5 + 2.0;
+        // Air conditioner outdoor unit and a meter box against the gable end.
+        box('metal', PLANT, 0.4, 0.6, 0.85, w * 0.5 + 0.2, 0.35, -d * 0.22);
+        // Carport: a flat canopy on two posts, beside the house.
+        if (ctx.rng.chance(0.55)) {
+          const cx = w * 0.5 + 2.4;
+          box('metal', CARPORT, 4.4, 0.12, 5.2, cx, 2.3, 0);
+          for (const oz of [-2.2, 2.2]) box('metal', RAIL, 0.14, 2.3, 0.14, cx + 2.0, 0, oz);
+        }
+        // The concrete block wall that surrounds every Japanese plot, with a
+        // gap left in the front one for the gate.
+        if (ctx.rng.chance(0.75)) {
+          const hw = w * 0.5 + 2.2;
+          const hd = d * 0.5 + 2.2;
+          const wallY = low - 0.2 - baseY;
           for (const [ox, oz, sx, sz] of [
-            [-hw, 0, 0.22, hd * 2], [hw, 0, 0.22, hd * 2],
-            [0, -hd, hw * 2, 0.22], [0, hd, hw * 2, 0.22],
+            [-hw, 0, 0.22, hd * 2], [hw, 0, 0.22, hd * 2], [0, -hd, hw * 2, 0.22],
           ] as [number, number, number, number][]) {
-            scale.set(sx, 1.5, sz);
-            groundMatrix(p.x, low - 0.2, p.z, yaw, matrix, scale);
-            matrix.multiply(new Matrix4().makeTranslation(ox / sx, 0, oz / sz));
-            collector('concrete').push(matrix, wallColor);
+            box('concrete', BLOCK_WALL, sx, 1.5, sz, ox, wallY, oz);
+          }
+          // Front wall, in two pieces with the gateway between them.
+          for (const dir of [-1, 1]) {
+            box('concrete', BLOCK_WALL, hw * 0.8, 1.5, 0.22, dir * hw * 0.6, wallY, hd);
           }
         }
         break;
@@ -414,60 +466,115 @@ export function buildBuildings(ctx: ChunkContext): void {
       case 'farmhouse': {
         const { w, d, h } = plan;
         color.setHSL(0.09, 0.07, ctx.rng.range(0.68, 0.9));
-        put(w, h, d, 0, 'siding', color);
-        scale.set(w + 1.8, ctx.rng.range(2.6, 3.8), d + 1.8);
-        groundMatrix(p.x, baseY + h, p.z, yaw, matrix, scale);
-        color.setHSL(0.03, 0.12, ctx.rng.range(0.16, 0.3));
-        hipRoofs.push(matrix, color);
+        box('siding', color, w, h, d);
+        // A big hipped tiled roof with a very deep overhang, and the engawa -
+        // the boarded verandah - under it along the long side.
+        roof(true, ROOF_TILE.clone().offsetHSL(0, 0, ctx.rng.range(-0.1, 0.02)), w, d, ctx.rng.range(2.8, 3.8), 3.2, h);
+        box('siding', new Color(0.44, 0.34, 0.24), w * 0.86, 0.14, 1.5, 0, 0.42, d * 0.5 + 0.6);
+        for (const ox of [-w * 0.34, 0, w * 0.34]) {
+          box('siding', new Color(0.4, 0.31, 0.22), 0.14, h - 0.4, 0.14, ox, 0.56, d * 0.5 + 1.2);
+        }
+        // A storehouse or a tool shed in the yard.
+        if (ctx.rng.chance(0.6)) {
+          const sw = 4.2;
+          box('siding', new Color(0.86, 0.85, 0.8), sw, 3.0, 4.0, w * 0.5 + 4.0, 0, d * 0.3);
+          roof(false, ROOF_TILE, sw, 4.0, 1.4, 1.0, 3.0);
+        }
         break;
       }
       case 'shophouse': {
         const { w, d, h } = plan;
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.8, 1.05));
-        put(w, h, d, 0, `facade${ctx.rng.int(0, 4)}`, color);
-        // Shop front: an awning over the pavement and a signboard standing up
-        // the corner of the building.
-        put(w + 0.5, 0.3, 1.6, 3.1, 'metal', new Color(0.5, 0.2, 0.18));
-        scale.set(0.9, h * 0.55, 0.35);
-        groundMatrix(p.x, baseY + h * 0.36, p.z, yaw, matrix, scale);
-        matrix.multiply(new Matrix4().makeTranslation((w * 0.5 - 0.6) / 0.9, 0, (d * 0.5 + 0.2) / 0.35));
+        box(`facade${ctx.rng.int(0, 4)}`, color, w, h, d);
+        // Shop front: glazing along the ground floor, an awning over the
+        // pavement and a signboard standing up the corner of the building.
+        box('metal', SHOPFRONT, w * 0.9, 2.6, 0.22, 0, 0.2, d * 0.5 + 0.05);
+        box('metal', new Color().setHSL(ctx.rng.next(), 0.5, 0.34), w + 0.6, 0.34, 1.7, 0, 3.05, d * 0.5 + 0.6);
+        scale.set(0.9, h * 0.62, 0.4);
+        groundMatrix(p.x, baseY + h * 0.32, p.z, yaw, matrix, scale);
+        matrix.multiply(new Matrix4().makeTranslation((w * 0.5 - 0.6) / 0.9, 0, (d * 0.5 + 0.25) / 0.4));
         signs.push(matrix, new Color().setHSL(ctx.rng.next(), 0.62, 0.52));
+        // Plant on the roof behind a low parapet.
+        box('concrete', PARAPET, w + 0.3, 0.7, d + 0.3, 0, h, 0);
+        box('metal', PLANT, 2.0, 1.6, 1.6, -w * 0.2, h, d * 0.15);
+        break;
+      }
+      case 'apartment': {
+        const { w, d, h } = plan;
+        const storeys = Math.max(2, Math.round(h / 2.9));
+        const floor = h / storeys;
+        color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.82, 1.04));
+        box(`facade${ctx.rng.int(0, 4)}`, color, w, h, d);
+        for (let f = 0; f < storeys; f++) {
+          const y = floor * f;
+          // Access balcony down one side, open to the air on its outer edge -
+          // the single most recognisable thing about Japanese walk-up flats.
+          box('concrete', CONCRETE, w, 0.16, 1.4, 0, y + floor - 0.16, -(d * 0.5 + 0.7));
+          box('metal', BALCONY, w, 1.0, 0.08, 0, y + floor, -(d * 0.5 + 1.36));
+          // Private balconies on the other, divided between the flats.
+          box('concrete', CONCRETE, w, 0.16, 1.6, 0, y + floor - 0.16, d * 0.5 + 0.8);
+          const bays = Math.max(2, Math.round(w / 6));
+          for (let b = 0; b < bays; b++) {
+            const bw = w / bays - 0.2;
+            box('concrete', PARAPET, bw, 1.1, 0.1, (b + 0.5) * (w / bays) - w * 0.5, y + floor, d * 0.5 + 1.58);
+            if (b > 0) {
+              box('concrete', PARAPET, 0.1, 1.1, 1.6, b * (w / bays) - w * 0.5, y + floor, d * 0.5 + 0.8);
+            }
+          }
+        }
+        // Stair tower at one end, and the roof parapet and tank.
+        box('concrete', PARAPET, 2.6, h + 1.4, 3.2, w * 0.5 + 1.3, 0, -d * 0.2);
+        box('concrete', PARAPET, w + 0.4, 0.9, d + 0.4, 0, h, 0);
+        box('metal', PLANT, 2.4, 1.5, 1.8, -w * 0.22, h + 0.9, d * 0.15);
         break;
       }
       case 'block': {
         const { w, d, h } = plan;
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.78, 1.06));
-        put(w, h, d, 0, `facade${ctx.rng.int(0, 4)}`, color);
-        // Roof-top plant behind a parapet, and a water tank on legs.
-        put(w * 0.3, 1.8, d * 0.3, h, 'concrete', new Color(0.72, 0.72, 0.7));
-        put(w + 0.4, 0.9, d + 0.4, h, 'concrete', new Color(0.76, 0.75, 0.72));
-        if (ctx.rng.chance(0.5)) {
-          scale.set(2.6, 1.5, 2.0);
-          groundMatrix(p.x, baseY + h + 1.9, p.z, yaw, matrix, scale);
-          matrix.multiply(new Matrix4().makeTranslation((w * 0.26) / 2.6, 0, (d * 0.26) / 2.0));
-          collector('metal').push(matrix, new Color(0.78, 0.78, 0.76));
+        box(`facade${ctx.rng.int(0, 4)}`, color, w, h, d);
+        // Roof-top plant behind a parapet, a water tank on legs, and the ducted
+        // condensers that clutter every city roof.
+        box('concrete', PARAPET, w + 0.4, 0.9, d + 0.4, 0, h, 0);
+        box('concrete', PARAPET, w * 0.3, 1.8, d * 0.3, 0, h, 0);
+        if (ctx.rng.chance(0.6)) {
+          box('metal', PLANT, 2.6, 1.5, 2.0, w * 0.26, h + 1.9, d * 0.26);
+          for (const ox of [-1.0, 1.0]) {
+            for (const oz of [-0.7, 0.7]) {
+              box('metal', RAIL, 0.16, 1.9, 0.16, w * 0.26 + ox, h, d * 0.26 + oz);
+            }
+          }
         }
+        box('metal', PLANT, 1.4, 0.9, 1.1, -w * 0.28, h + 0.9, -d * 0.2);
         break;
       }
       case 'tower': {
         const { w, d, h } = plan;
         color.setRGB(1, 1, 1).multiplyScalar(ctx.rng.range(0.8, 1.04));
-        put(w, h, d, 0, `facade${ctx.rng.int(0, 4)}`, color);
-        put(w * 0.55, 3.2, d * 0.55, h, 'concrete', new Color(0.66, 0.66, 0.65));
-        put(w + 0.5, 1.1, d + 0.5, h, 'concrete', new Color(0.7, 0.7, 0.69));
-        put(0.24, 6.5, 0.24, h + 3.2, 'metal', new Color(0.8, 0.5, 0.45));
+        // Towers step back as they rise, which is what stops a city block
+        // reading as a row of identical slabs.
+        const lowerH = h * ctx.rng.range(0.6, 0.78);
+        box(`facade${ctx.rng.int(0, 4)}`, color, w, lowerH, d);
+        box(`facade${ctx.rng.int(0, 4)}`, color, w * 0.78, h - lowerH, d * 0.78, 0, lowerH);
+        box('concrete', PARAPET, w + 0.5, 0.6, d + 0.5, 0, lowerH);
+        box('concrete', PARAPET, w * 0.8, 1.1, d * 0.8, 0, h);
+        box('concrete', PARAPET, w * 0.45, 3.2, d * 0.45, 0, h + 1.1);
+        // Mast with the aviation warning light every tall building carries.
+        box('metal', new Color(0.85, 0.5, 0.42), 0.24, 6.5, 0.24, 0, h + 4.3);
         break;
       }
       case 'warehouse': {
         const { w, d, h } = plan;
         color.setRGB(0.72, 0.75, 0.78).multiplyScalar(ctx.rng.range(0.85, 1.15));
-        put(w, h, d, 0, 'metal', color);
-        put(w + 0.7, 0.5, d + 0.7, h, 'metal', color.clone().multiplyScalar(0.85));
-        // Roller shutter across the gable end.
-        scale.set(w * 0.34, h * 0.62, 0.25);
-        groundMatrix(p.x, baseY, p.z, yaw, matrix, scale);
-        matrix.multiply(new Matrix4().makeTranslation(0, 0, (d * 0.5 + 0.1) / 0.25));
-        collector('metal').push(matrix, new Color(0.55, 0.56, 0.58));
+        box('corrugated', color, w, h, d);
+        // A shallow pitched roof rather than a flat lid, with a monitor along
+        // the ridge for daylight.
+        roof(false, color.clone().multiplyScalar(0.9), w, d, 1.5, 0.8, h);
+        box('corrugated', color.clone().multiplyScalar(0.95), w * 0.3, 0.7, d + 0.4, 0, h + 0.9);
+        // Roller shutters across the gable end, and a loading canopy over them.
+        for (const ox of [-w * 0.22, w * 0.22]) {
+          box('metal', SHUTTER, w * 0.3, h * 0.62, 0.25, ox, 0, d * 0.5 + 0.05);
+        }
+        box('metal', color.clone().multiplyScalar(0.8), w * 0.9, 0.2, 2.2, 0, h * 0.68, d * 0.5 + 1.0);
         break;
       }
     }
@@ -478,6 +585,7 @@ export function buildBuildings(ctx: ChunkContext): void {
     if (key === 'siding') material = sidingMaterial();
     else if (key === 'metal') material = metalMaterial();
     else if (key === 'concrete') material = concreteMaterial();
+    else if (key === 'corrugated') material = corrugatedMaterial();
     else material = facadeMaterial(Number(key.replace('facade', '')));
     const mesh = makeInstanced(unitBox(), material, c, {
       castShadow: true,
@@ -489,11 +597,13 @@ export function buildBuildings(ctx: ChunkContext): void {
 
   const roofMesh = makeInstanced(gableRoof(), roofMaterial(), roofs, {
     castShadow: true,
+    receiveShadow: true,
     name: 'roofs',
   });
   if (roofMesh) ctx.group.add(roofMesh);
   const hipMesh = makeInstanced(hipRoof(), roofMaterial(), hipRoofs, {
     castShadow: true,
+    receiveShadow: true,
     name: 'hip-roofs',
   });
   if (hipMesh) ctx.group.add(hipMesh);
@@ -503,6 +613,17 @@ export function buildBuildings(ctx: ChunkContext): void {
   });
   if (signMesh) ctx.group.add(signMesh);
 }
+
+const CONCRETE = new Color(0.66, 0.65, 0.62);
+const BLOCK_WALL = new Color(0.72, 0.71, 0.67);
+const PARAPET = new Color(0.74, 0.73, 0.7);
+const ROOF_TILE = new Color(0.24, 0.27, 0.32);
+const BALCONY = new Color(0.78, 0.78, 0.76);
+const RAIL = new Color(0.62, 0.63, 0.64);
+const PLANT = new Color(0.7, 0.71, 0.72);
+const CARPORT = new Color(0.82, 0.83, 0.84);
+const SHOPFRONT = new Color(0.3, 0.36, 0.4);
+const SHUTTER = new Color(0.55, 0.56, 0.58);
 
 /**
  * Plan size of a building, drawn before the plot is tested so the ground can be
@@ -514,12 +635,14 @@ function planBuilding(ctx: ChunkContext, kind: BuildingKind): { w: number; d: nu
       return {
         w: ctx.rng.range(6, 9.5),
         d: ctx.rng.range(6.5, 11),
-        h: ctx.rng.chance(0.45) ? ctx.rng.range(5.4, 6.8) : ctx.rng.range(2.9, 3.4),
+        h: ctx.rng.chance(0.62) ? ctx.rng.range(5.4, 6.4) : ctx.rng.range(2.9, 3.4),
       };
     case 'farmhouse':
       return { w: ctx.rng.range(9, 14), d: ctx.rng.range(7, 11), h: ctx.rng.range(3.0, 4.0) };
     case 'shophouse':
       return { w: ctx.rng.range(6, 10), d: ctx.rng.range(9, 14), h: ctx.rng.range(7, 11) };
+    case 'apartment':
+      return { w: ctx.rng.range(16, 28), d: ctx.rng.range(9, 12), h: ctx.rng.range(8.4, 14.5) };
     case 'block':
       return { w: ctx.rng.range(12, 22), d: ctx.rng.range(12, 22), h: ctx.rng.range(11, 28) };
     case 'tower':
@@ -529,18 +652,15 @@ function planBuilding(ctx: ChunkContext, kind: BuildingKind): { w: number; d: nu
   }
 }
 
-function pickBuildingKind(
-  ctx: ChunkContext,
-  biomeId: string,
-  density: number,
-  cluster: number,
-): BuildingKind {
+function pickBuildingKind(ctx: ChunkContext, biomeId: string, cluster: number): BuildingKind {
   switch (biomeId) {
     case 'city':
       if (cluster > 0.72 && ctx.rng.chance(0.35)) return 'tower';
-      return ctx.rng.chance(0.62) ? 'block' : 'shophouse';
+      if (ctx.rng.chance(0.2)) return 'apartment';
+      return ctx.rng.chance(0.58) ? 'block' : 'shophouse';
     case 'suburb':
-      if (ctx.rng.chance(0.14)) return 'block';
+      if (ctx.rng.chance(0.16)) return 'apartment';
+      if (ctx.rng.chance(0.12)) return 'block';
       if (ctx.rng.chance(0.16)) return 'shophouse';
       return ctx.rng.chance(0.1) ? 'warehouse' : 'house';
     case 'farmland':
@@ -549,7 +669,6 @@ function pickBuildingKind(
     case 'coast':
       return ctx.rng.chance(0.2) ? 'warehouse' : 'house';
     default:
-      void density;
       return 'farmhouse';
   }
 }

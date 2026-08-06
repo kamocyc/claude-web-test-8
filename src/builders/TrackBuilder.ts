@@ -5,6 +5,7 @@ import {
   Group,
   Mesh,
   MeshBasicMaterial,
+  MeshStandardMaterial,
   Matrix4,
   Vector3,
 } from 'three';
@@ -17,6 +18,8 @@ import {
   unitBox,
   unitCylinder,
   asphaltMaterial,
+  crossingDeckMaterial,
+  hazardMaterial,
 } from './Prefabs';
 import { getBallastMaterial, getRailMaterial, getSleeperMaterial, createTerrainMaterial } from '../materials/Materials';
 import { blendedGrassColor } from '../world/Biome';
@@ -560,7 +563,22 @@ export function buildSigns(ctx: ChunkContext): void {
   }
 }
 
-/** Level crossings: road surface, warning devices and animated barriers. */
+/**
+ * Level crossings, to the Japanese prototype.
+ *
+ * The road runs across the line, so its carriageway is measured along the
+ * chainage and its length laterally. On each approach, on the left of the
+ * carriageway as a driver meets it, stands one post carrying the whole warning
+ * assembly: the striped mast, the X of the crossbuck, two red lamps that flash
+ * alternately, the direction indicator that tells you which way the train is
+ * coming, the bell, and the machine at the foot whose arm swings down across
+ * the road. The two posts are diagonally opposite each other, which is why a
+ * closed crossing has two arms meeting in the middle rather than one.
+ *
+ * Between the rails the road is carried on panels with a flangeway left open
+ * beside each rail - the gap the wheel flanges run in, and the reason a
+ * crossing is a rough ride.
+ */
 export function buildCrossings(ctx: ChunkContext): void {
   for (const info of ctx.track.crossings) {
     if (info.s < ctx.sStart || info.s >= ctx.sEnd) continue;
@@ -568,16 +586,36 @@ export function buildCrossings(ctx: ChunkContext): void {
     if (sample.structure !== 0) continue;
 
     const road = new MeshBuilder();
+    const deck = new MeshBuilder();
     const props = new MeshBuilder();
+    const hazard = new MeshBuilder();
+    const metal = new MeshBuilder();
     const matrix = new Matrix4();
     const scale = new Vector3();
-    const asphalt = new Color(0.55, 0.55, 0.56);
-    const deck = new Color(0.72, 0.71, 0.68);
-    const poleColor = new Color(0.95, 0.93, 0.86);
-    const dark = new Color(0.2, 0.2, 0.22);
+    const asphalt = new Color(0.58, 0.58, 0.59);
+    const white = new Color(0.94, 0.94, 0.9);
 
-    // Road crossing the line, plus the timber deck between the rails.
     const halfWidth = info.width * 0.5;
+
+    /**
+     * Height of the road surface at a lateral offset, relative to the rail
+     * head. Everything that stands on the road - a post, a marking, a barrier
+     * machine - has to be put at this height rather than at the rail head, or
+     * it floats over the carriageway wherever the road falls away from the
+     * line.
+     */
+    const roadHeight = (lat: number, s: number): number => {
+      const sm = ctx.track.sampleAt(s);
+      const rx = -Math.sin(sm.heading);
+      const rz = Math.cos(sm.heading);
+      const x = sm.x + rx * lat;
+      const z = sm.z + rz * lat;
+      const groundY = ctx.field.ground(sm, lat, x, z);
+      const y = Math.abs(lat) < 7 ? sm.y - 0.12 : Math.max(groundY + 0.06, sm.y - 0.55);
+      return y - sm.y;
+    };
+
+    // --- road surface ------------------------------------------------------
     const roadRows: Vector3[][] = [];
     const uvV: number[] = [];
     for (let k = -1; k <= 1; k += 2) {
@@ -598,87 +636,224 @@ export function buildCrossings(ctx: ChunkContext): void {
     }
     road.addSweep(roadRows, asphalt, uvV, [0, 0.4, 0.6, 1]);
 
-    // Deck panels flush with the rail head.
-    scale.set(13, 0.14, info.width);
-    trackMatrix(sample, 0, -0.02, matrix, 0, scale);
-    props.add(unitBox(), matrix, deck);
+    // Crossing panels. Each running line gets a panel between its rails and one
+    // outside each of them, with the flangeway left open beside every rail.
+    const railHalf = TRACK_GAUGE / 2;
+    const flangeway = 0.075;
+    const railHead = 0.036;
+    const panel = (from: number, to: number): void => {
+      if (to - from < 0.05) return;
+      scale.set(to - from, 0.17, info.width);
+      trackMatrix(sample, (from + to) / 2, -0.17, matrix, 0, scale);
+      deck.add(unitBox(), matrix, new Color(1, 1, 1));
+    };
+    const edges: number[] = [];
+    for (const centre of TRACK_CENTRES) {
+      // Between the rails, and out to the flangeway on the far side of each.
+      panel(centre - railHalf + railHead + flangeway, centre + railHalf - railHead - flangeway);
+      edges.push(centre - railHalf - railHead - flangeway, centre + railHalf + railHead + flangeway);
+    }
+    edges.sort((a, b) => a - b);
+    panel(-6.4, edges[0]);
+    panel(edges[1], edges[2]);
+    panel(edges[3], 6.4);
+    // Guard rubbers filling the flangeway down to the rail foot.
+    for (const centre of TRACK_CENTRES) {
+      for (const side of [-1, 1]) {
+        scale.set(0.07, 0.1, info.width);
+        trackMatrix(sample, centre + side * (railHalf - railHead - flangeway / 2), -0.14, matrix, 0, scale);
+        props.add(unitBox(), matrix, new Color(0.1, 0.1, 0.11));
+      }
+    }
 
+    // Stop lines and the road edge markings on each approach.
+    for (const side of [-1, 1]) {
+      scale.set(0.45, 0.02, info.width - 0.6);
+      trackMatrix(sample, side * 9.2, roadHeight(side * 9.2, info.s) + 0.01, matrix, 0, scale);
+      props.add(unitBox(), matrix, white);
+      // Delineator posts along the road edge over the railway boundary.
+      for (const along of [-1, 1]) {
+        const postS = info.s + along * (halfWidth + 0.5);
+        const postSample = ctx.track.sampleAt(postS);
+        for (let i = 0; i < 3; i++) {
+          const lat = side * (7.6 + i * 2.6);
+          const base = roadHeight(lat, postS);
+          scale.set(0.09, 0.85, 0.09);
+          trackMatrix(postSample, lat, base, matrix, 0, scale);
+          props.add(unitBox(), matrix, white);
+          scale.set(0.11, 0.14, 0.11);
+          trackMatrix(postSample, lat, base + 0.65, matrix, 0, scale);
+          props.add(unitBox(), matrix, new Color(0.85, 0.35, 0.1));
+        }
+      }
+    }
+
+    // --- warning devices and barriers --------------------------------------
     const barriers: Group[] = [];
     const lamps: Mesh[] = [];
+
     for (const side of [-1, 1]) {
-      const lateral = side * (7.4 + info.width * 0.1);
-      const sOffset = info.s + side * (halfWidth + 1.4);
-      const postSample = ctx.track.sampleAt(sOffset);
+      // Traffic keeps left in Japan, so the post for the approach from this
+      // side stands on the near side of that carriageway - which puts the two
+      // posts diagonally opposite one another.
+      const lateral = side * (7.2 + info.width * 0.06);
+      const postS = info.s - side * (halfWidth + 0.9);
+      const postSample = ctx.track.sampleAt(postS);
+      /** The arm swings out across the carriageway, i.e. along the line. */
+      const armDir = side;
+      const foot = roadHeight(lateral, postS);
 
-      scale.set(0.16, 3.1, 0.16);
-      trackMatrix(postSample, lateral, -0.5, matrix, 0, scale);
-      props.add(unitBox(), matrix, poleColor);
+      // Mast, in the yellow and black of a warning post.
+      scale.set(0.17, 3.5, 0.17);
+      trackMatrix(postSample, lateral, foot, matrix, 0, scale);
+      hazard.add(unitBox(), matrix, new Color(1, 1, 1), 6);
+      scale.set(0.44, 0.16, 0.44);
+      trackMatrix(postSample, lateral, foot - 0.05, matrix, 0, scale);
+      props.add(unitBox(), matrix, new Color(0.62, 0.62, 0.6));
 
-      // Warning cross and lamps.
-      scale.set(1.5, 0.16, 0.08);
-      trackMatrix(postSample, lateral, 2.5, matrix, Math.PI / 5, scale);
-      props.add(unitBox(), matrix, poleColor);
-      scale.set(1.5, 0.16, 0.08);
-      trackMatrix(postSample, lateral, 2.5, matrix, -Math.PI / 5, scale);
-      props.add(unitBox(), matrix, poleColor);
-      scale.set(0.9, 0.3, 0.12);
-      trackMatrix(postSample, lateral, 1.9, matrix, 0, scale);
-      props.add(unitBox(), matrix, dark);
+      // The crossbuck: two bars crossed in the plane facing the road.
+      for (const lean of [1, -1]) {
+        const bar = new Matrix4();
+        trackMatrix(postSample, lateral - side * 0.14, foot + 3.2, bar, 0);
+        bar.multiply(new Matrix4().makeRotationX(lean * 0.72));
+        bar.multiply(new Matrix4().makeScale(0.07, 0.16, 1.5));
+        bar.multiply(new Matrix4().makeTranslation(0, 0, 0));
+        props.add(unitBox(), bar, new Color(0.96, 0.78, 0.06));
+      }
 
+      // Two red lamps side by side under it, each in its own hood.
       for (const lampSide of [-1, 1]) {
-        const lamp = new Mesh(unitCylinder(8), LAMP_OFF);
+        const hood = new Matrix4();
+        trackMatrix(postSample, lateral - side * 0.24, foot + 2.77, hood, 0);
+        hood.multiply(new Matrix4().makeRotationZ(side * Math.PI * 0.5));
+        hood.multiply(new Matrix4().makeScale(0.34, 0.2, 0.34));
+        hood.multiply(new Matrix4().makeTranslation(0, 0, (lampSide * 0.29) / 0.34));
+        props.add(unitCylinder(12), hood, new Color(0.13, 0.13, 0.14));
+
+        const lamp = new Mesh(unitCylinder(12), LAMP_OFF);
         const m = new Matrix4();
-        trackMatrix(postSample, lateral + lampSide * 0.28, 2.0, m, 0, new Vector3(0.2, 0.08, 0.2));
+        trackMatrix(postSample, lateral - side * 0.38, foot + 2.77, m, 0);
+        m.multiply(new Matrix4().makeRotationZ(side * Math.PI * 0.5));
+        m.multiply(new Matrix4().makeScale(0.26, 0.07, 0.26));
+        m.multiply(new Matrix4().makeTranslation(0, 0, (lampSide * 0.29) / 0.26));
         lamp.applyMatrix4(m);
         lamp.matrixAutoUpdate = false;
         lamp.updateMatrix();
         lamps.push(lamp);
         ctx.group.add(lamp);
       }
+      // Backing plate behind the pair.
+      scale.set(0.07, 0.44, 0.86);
+      trackMatrix(postSample, lateral - side * 0.18, foot + 2.55, matrix, 0, scale);
+      props.add(unitBox(), matrix, new Color(0.14, 0.14, 0.15));
 
-      // Barrier: a pivot group so it can be animated down over the road.
-      const pivot = new Group();
+      // Direction indicator below the lamps, and the bell on top of the mast.
+      scale.set(0.09, 0.3, 0.8);
+      trackMatrix(postSample, lateral - side * 0.2, foot + 2.11, matrix, 0, scale);
+      props.add(unitBox(), matrix, new Color(0.16, 0.17, 0.18));
+      scale.set(0.06, 0.2, 0.7);
+      trackMatrix(postSample, lateral - side * 0.25, foot + 2.16, matrix, 0, scale);
+      props.add(unitBox(), matrix, new Color(0.85, 0.6, 0.1));
+      const bell = new Matrix4();
+      trackMatrix(postSample, lateral, foot + 3.5, bell, 0, new Vector3(0.3, 0.26, 0.3));
+      metal.add(unitCylinder(10), bell, new Color(0.5, 0.5, 0.52));
+
+      // Name plate, which every crossing in the country carries.
+      scale.set(0.05, 0.24, 0.62);
+      trackMatrix(postSample, lateral - side * 0.14, foot + 1.65, matrix, 0, scale);
+      props.add(unitBox(), matrix, white);
+
+      // The machine at the foot of the mast, and the arm pivoted off it.
+      scale.set(0.42, 1.05, 0.52);
+      trackMatrix(postSample, lateral + side * 0.42, foot, matrix, 0, scale);
+      metal.add(unitBox(), matrix, new Color(0.72, 0.72, 0.7));
+
+      // The arm hangs off a child of the anchor rather than off the anchor
+      // itself. `Object3D.rotation` is applied in the object's own parent
+      // frame, so turning the anchor directly would lift the arm about the
+      // world axis instead of about the track's lateral one, and a crossing on
+      // a curve would drop its barriers at an angle to the road.
+      const anchor = new Group();
       const pivotMatrix = new Matrix4();
-      trackMatrix(postSample, lateral, 1.05, pivotMatrix, 0);
-      pivot.applyMatrix4(pivotMatrix);
+      trackMatrix(postSample, lateral + side * 0.42, foot + 1.05, pivotMatrix, 0);
+      anchor.applyMatrix4(pivotMatrix);
+      const pivot = new Group();
+      anchor.add(pivot);
 
-      // Local space: +X is the track's right vector, +Y up. The arm reaches
-      // inwards across the road and pivots up about the along-track axis.
+      // Local space: +X is the track's right vector, +Y up, +Z back along the
+      // line. The arm therefore lies along Z, across the carriageway, and lifts
+      // by turning about X.
       const armBuilder = new MeshBuilder();
-      const armLength = 5.4;
+      const armLength = Math.max(3.6, info.width * 0.62);
       const armMatrix = new Matrix4();
-      armMatrix.makeScale(armLength, 0.14, 0.14);
-      armMatrix.setPosition(-side * armLength * 0.5, 0, 0);
-      armBuilder.add(unitBox(), armMatrix, new Color(1, 0.98, 0.94));
-      // Hazard stripes.
-      for (let k = 0; k < 5; k++) {
-        const stripe = new Matrix4();
-        stripe.makeScale(armLength * 0.09, 0.15, 0.15);
-        stripe.setPosition(-side * (0.55 + k * 1.05), 0, 0);
-        armBuilder.add(unitBox(), stripe, new Color(0.85, 0.12, 0.1));
+      armMatrix.makeScale(0.11, 0.12, armLength);
+      armMatrix.setPosition(0, 0, armDir * armLength * 0.5);
+      armBuilder.add(unitBox(), armMatrix, new Color(1, 1, 1), 8);
+      // Hanging skirts along the arm and a red lamp at its tip.
+      const skirts = Math.max(3, Math.floor(armLength / 0.9));
+      for (let k = 1; k <= skirts; k++) {
+        const at = armDir * (k * armLength) / (skirts + 1);
+        const skirt = new Matrix4().makeScale(0.05, 0.34, 0.1);
+        skirt.setPosition(0, -0.34, at);
+        armBuilder.add(unitBox(), skirt, new Color(1, 1, 1), 3);
       }
-      const armMesh = armBuilder.toMesh(plainMaterial(), false, 'barrier-arm');
+      const armMesh = armBuilder.toMesh(hazardMaterial(), false, 'barrier-arm');
       if (armMesh) {
         armMesh.castShadow = true;
         pivot.add(armMesh);
       }
-      pivot.userData.side = side;
-      pivot.rotation.z = -side * Math.PI * 0.5;
-      ctx.group.add(pivot);
+      const tip = new Mesh(unitBox(), BARRIER_TIP);
+      tip.scale.set(0.14, 0.15, 0.3);
+      tip.position.set(0, -0.075, armDir * (armLength - 0.15));
+      pivot.add(tip);
+      // Counterweight behind the pivot.
+      const weight = new Mesh(unitBox(), BARRIER_WEIGHT);
+      weight.scale.set(0.18, 0.3, 0.5);
+      weight.position.set(0, -0.15, -armDir * 0.55);
+      pivot.add(weight);
+
+      pivot.userData.side = armDir;
+      pivot.rotation.x = -armDir * Math.PI * 0.5;
+      ctx.group.add(anchor);
       barriers.push(pivot);
+
+      // Emergency button and an obstacle detector on the opposite corner.
+      const buttonS = info.s + side * (halfWidth + 0.9);
+      const buttonSample = ctx.track.sampleAt(buttonS);
+      const buttonFoot = roadHeight(lateral, buttonS);
+      scale.set(0.12, 1.15, 0.12);
+      trackMatrix(buttonSample, lateral, buttonFoot, matrix, 0, scale);
+      metal.add(unitBox(), matrix, new Color(0.7, 0.7, 0.68));
+      scale.set(0.26, 0.34, 0.3);
+      trackMatrix(buttonSample, lateral - side * 0.1, buttonFoot + 1.05, matrix, 0, scale);
+      props.add(unitBox(), matrix, new Color(0.94, 0.72, 0.06));
+      const detectorFoot = roadHeight(side * 6.9, buttonS);
+      scale.set(0.14, 0.7, 0.14);
+      trackMatrix(buttonSample, side * 6.9, detectorFoot, matrix, 0, scale);
+      metal.add(unitBox(), matrix, new Color(0.66, 0.67, 0.68));
+      scale.set(0.16, 0.16, 0.2);
+      trackMatrix(buttonSample, side * 6.9, detectorFoot + 0.65, matrix, 0, scale);
+      props.add(unitBox(), matrix, new Color(0.18, 0.19, 0.2));
     }
 
-    const roadMesh = road.toMesh(asphaltMaterial(), true, 'crossing-road');
-    if (roadMesh) {
-      roadMesh.receiveShadow = true;
-      ctx.group.add(roadMesh);
-    }
-    const propsMesh = props.toMesh(plainMaterial(), false, 'crossing-props');
-    if (propsMesh) {
-      propsMesh.castShadow = true;
-      ctx.group.add(propsMesh);
+    const meshes: [MeshBuilder, ReturnType<typeof plainMaterial>, string][] = [
+      [road, asphaltMaterial(), 'crossing-road'],
+      [deck, crossingDeckMaterial(), 'crossing-deck'],
+      [props, plainMaterial(), 'crossing-props'],
+      [hazard, hazardMaterial(), 'crossing-hazard'],
+      [metal, metalMaterial(), 'crossing-metal'],
+    ];
+    for (const [builder, material, name] of meshes) {
+      const mesh = builder.toMesh(material, name === 'crossing-road', name);
+      if (!mesh) continue;
+      mesh.castShadow = name !== 'crossing-road' && name !== 'crossing-deck';
+      mesh.receiveShadow = true;
+      ctx.group.add(mesh);
     }
 
     ctx.crossings.push({ info, barriers, lamps, state: 0, bellPhase: 0 });
   }
 }
+
+const BARRIER_TIP = new MeshBasicMaterial({ color: 0xd42a1c });
+const BARRIER_WEIGHT = new MeshStandardMaterial({ color: 0x2b2c2e, roughness: 0.8 });

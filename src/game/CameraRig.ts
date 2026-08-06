@@ -252,13 +252,27 @@ export class CameraRig {
       const sample = this.track.sampleAt(anchorS);
       trackAxes(sample, axisRight, axisUp, axisFwd);
       const side = Math.random() > 0.5 ? 1 : -1;
+      const lateral = side * lerp(16, 34, Math.random());
       this.lineSideAnchor
         .set(sample.x, sample.y, sample.z)
-        .addScaledVector(axisRight, side * lerp(16, 34, Math.random()));
+        .addScaledVector(axisRight, lateral);
       // Stand on the ground rather than at rail level: in a cutting the rail
-      // level would be underground.
-      const ground = this.field.heightAt(this.lineSideAnchor.x, this.lineSideAnchor.z).y;
-      this.lineSideAnchor.y = Math.max(ground, sample.y - 3) + lerp(1.7, 7, Math.random());
+      // level would be underground. It has to be the ground the corridor mesh
+      // actually draws at this offset, not the natural country underneath it -
+      // beside a station the two differ by the whole depth of the forecourt,
+      // and standing on the lower of them puts the camera under the tarmac.
+      // Whichever of the two meshes is higher here is the one the camera would
+      // otherwise end up underneath, so take the greater of them.
+      const ground = Math.max(
+        this.field.ground(sample, lateral, this.lineSideAnchor.x, this.lineSideAnchor.z),
+        this.field.heightAt(this.lineSideAnchor.x, this.lineSideAnchor.z).y,
+      );
+      // A platform is 1.1 m above the rail and the canopy over it half as high
+      // again, so a camera at head height beside a station films the back of a
+      // wall. Stand well above it there and let the shot look down on the
+      // train instead.
+      const stand = lerp(1.7, 7, Math.random()) + sample.stationZone * 3.4;
+      this.lineSideAnchor.y = Math.max(ground, sample.y - 3) + stand;
       if (sample.structure === STRUCT_TUNNEL) {
         // No standing beside the line in here: take the shot from the walkway.
         this.lineSideAnchor

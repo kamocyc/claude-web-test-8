@@ -3,7 +3,9 @@ dist/
 *.local
 .DS_Store
 
-# Scratch output from the capture rig (tools/shots.mjs, tools/blind.mjs).
+# Scratch output from the capture rig (tools/shots.mjs, tools/blind.mjs) and
+# from the model turntable (tools/modelshot.mjs).
+modelshots/
 screenshots/
 shots/
 shots-*/

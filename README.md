@@ -152,6 +152,26 @@ needs a few metres in. `buildTunnels` then caps that slot with a piece of
 hillside cut to the same heights, so it seals without a seam, and the portal
 head wall is the face of that cap with the arch punched through it.
 
+**Stations** (`StationBuilder.ts`) are built to the Japanese standards rather
+than to a silhouette: a 1,100 mm platform with a precast coped edge and the
+yellow warning blocks — dots for the drop, ribs on the safe side — set 400 mm
+back from it, a steel canopy on a single row of columns with the roof
+cantilevered both ways and drained to a gutter at the back, name boards facing
+the arriving train, a hanging board and an amber departure indicator under the
+canopy, benches turned across the platform, a drinks machine, a bin and a
+timetable frame. A station building with a deep-eaved hipped roof fronts the
+forecourt, a covered walkway and a flight of steps link it to the platform, and
+where the route calls for one a glazed footbridge crosses the line.
+
+**Level crossings** are the Japanese arrangement: on each approach, on the
+left of the carriageway as a driver meets it, one striped mast carries the
+crossbuck, two red lamps that flash alternately, the direction indicator, the
+bell and the machine whose arm swings down across the road — which puts the two
+masts diagonally opposite each other. The arm lies along the line and lifts
+about the track's lateral axis, so it blocks the road rather than the railway;
+between the rails the road is carried on panels with the flangeway left open
+beside each one.
+
 **Chunks** (`src/world/Chunk.ts`) cover 250 m of line each and carry the
 permanent way, overhead line, signalling, stations, structures and scenery.
 They are built ahead of the train inside a per-frame time budget and released
@@ -192,6 +212,27 @@ a curve long before you can see it, and a 25 ‰ climb is something you feel.
 The consist is placed from its bogie centres, which is what makes a rake swing
 properly through a curve. The cab is modelled around the driver's eye, and
 trains you meet on the opposite road are real trains, not a sound effect.
+
+**The stock** (`TrainModel.ts`) is a modern JR commuter EMU worked out from its
+own dimensions: 20 m over the couplers, a 2,950 mm laser-welded stainless
+shell with the beading rolled along it, four 1,320 mm sliding doors a side, a
+single air conditioner on the roof and a single-arm pantograph on alternate
+cars. Everything is measured from the rail head, which is the datum the track
+and the platforms use as well, so the door threshold lands level with a
+1,100 mm platform and the pantograph shoe reaches exactly the height the
+contact wire is strung at — neither is tuned against the other.
+
+The shell is swept in two strips, below the windows and above them, which
+leaves the window band genuinely open rather than papered over with dark
+panels: doors, glazing and pillars fill it, you can see the saloon through the
+glass, and the lighting reads through it after dark. Underneath, a bolsterless
+bogie carries coned wheels with real flanges, disc brakes, coil primary
+suspension and an air spring a side; the traction equipment hangs on one side
+of the underframe and the auxiliaries and reservoirs on the other. The cab
+front is a moulded mask with a two-piece raked windscreen, an emergency
+gangway door offset to the driver's right, lamp clusters low in each corner and
+a skirt over the coupler — and the windscreen is a genuine aperture through it,
+because the driver has to see out.
 
 ## Sound
 
@@ -234,3 +275,15 @@ metres in the air is only obvious from the right angle, so this is the check
 that does not depend on catching it in a screenshot.
 `tools/rivershot.mjs` photographs the first river crossing on a route, which is
 where the terrain, the bridge and the water surface all have to agree at once.
+
+`tools/model.html` is a turntable: it stages one hand-built model at a time — a
+car, a station, a level crossing, a street — against a neutral background, and
+`tools/modelshot.mjs` steps a camera round it and writes a frame per view. The
+game itself takes half a minute to settle before a chunk is worth photographing,
+which is far too slow a loop for judging whether a bogie reads as a bogie, so
+this exists to shorten it to a second or two:
+
+```bash
+npm run dev
+node tools/modelshot.mjs cab-car     # also: car, station, crossing, buildings
+```

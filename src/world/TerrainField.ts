@@ -421,9 +421,12 @@ export class TerrainField {
     const t = smoothstep(FORMATION_HALF, FORMATION_HALF + slopeWidth, ax);
     let h = lerp(formationY, nat, t);
 
-    // Station forecourts are graded flat.
-    if (sample.stationZone > 0.01 && ax < 70) {
-      const flat = sample.stationZone * (1 - smoothstep(24, 70, ax));
+    // Station forecourts are graded flat - but only as far as a forecourt
+    // actually goes. Running the grading out to seventy metres laid a hundred
+    // and forty metre pan of bare fill beside every platform, which read as a
+    // car park the size of the village it served.
+    if (sample.stationZone > 0.01 && ax < 46) {
+      const flat = sample.stationZone * (1 - smoothstep(16, 46, ax));
       h = lerp(h, formationY - 0.9, flat * 0.85);
     }
     return lerp(nat, h, built) + tileBias;

@@ -256,6 +256,45 @@ export function createGlassMaterial(tint = 0x2c3a42, opacity = 0.55): MeshPhysic
   });
 }
 
+/**
+ * Bodyside material for rolling stock.
+ *
+ * Japanese commuter stock is a laser-welded stainless shell, not a painted one:
+ * it is a fairly rough metal that carries the beading rolled along the car and
+ * takes a coloured film rather than paint. Vertex colour supplies the livery
+ * band, so one material serves the whole shell.
+ */
+let stainlessMaterial: MeshStandardMaterial | null = null;
+export function getStainlessMaterial(): MeshStandardMaterial {
+  if (!stainlessMaterial) {
+    stainlessMaterial = new MeshStandardMaterial({
+      map: textures.stainless(),
+      normalMap: textures.stainlessNormal(),
+      normalScale: new Vector2(0.7, 0.7),
+      roughness: 0.34,
+      metalness: 0.4,
+      vertexColors: true,
+      envMapIntensity: 0.9,
+    });
+  }
+  return stainlessMaterial;
+}
+
+/** Bogies, underframe equipment and everything else painted dark below the floor. */
+let underframeMaterial: MeshStandardMaterial | null = null;
+export function getUnderframeMaterial(): MeshStandardMaterial {
+  if (!underframeMaterial) {
+    underframeMaterial = new MeshStandardMaterial({
+      map: textures.steel(),
+      roughness: 0.72,
+      metalness: 0.55,
+      vertexColors: true,
+      envMapIntensity: 0.6,
+    });
+  }
+  return underframeMaterial;
+}
+
 /** Body panel material for rolling stock: painted metal with clear coat. */
 export function createBodyMaterial(color: number, roughness = 0.34): MeshPhysicalMaterial {
   return new MeshPhysicalMaterial({

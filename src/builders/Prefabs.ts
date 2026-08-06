@@ -83,6 +83,110 @@ export function unitPlane(): BufferGeometry {
   return planeCache;
 }
 
+/**
+ * Surface of revolution about the Y axis from a half section given as
+ * (radius, height) pairs, capped top and bottom.
+ *
+ * Wheels, insulators, lamp hoods, air springs, buffer heads and vents are all
+ * turned parts in the real world, and a stack of boxes never reads as one. The
+ * section is walked once, so a wheel with a tread taper and a flange costs the
+ * same as a cylinder to write.
+ */
+export function revolved(profile: [number, number][], segments = 12): BufferGeometry {
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let i = 0; i <= segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    for (let j = 0; j < profile.length; j++) {
+      const [r, y] = profile[j];
+      positions.push(ca * r, y, sa * r);
+      // Section normal, turned into the meridian plane.
+      const prev = profile[Math.max(0, j - 1)];
+      const next = profile[Math.min(profile.length - 1, j + 1)];
+      const dr = next[0] - prev[0];
+      const dy = next[1] - prev[1];
+      const len = Math.hypot(dr, dy) || 1;
+      const nr = dy / len;
+      const ny = -dr / len;
+      normals.push(ca * nr, ny, sa * nr);
+      uvs.push(i / segments, j / (profile.length - 1));
+    }
+  }
+  const stride = profile.length;
+  for (let i = 0; i < segments; i++) {
+    for (let j = 0; j < profile.length - 1; j++) {
+      const a = i * stride + j;
+      const b = (i + 1) * stride + j;
+      indices.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+  }
+  // Caps, as fans about the axis at each end.
+  const capAt = (j: number, up: boolean) => {
+    const centre = positions.length / 3;
+    positions.push(0, profile[j][1], 0);
+    normals.push(0, up ? 1 : -1, 0);
+    uvs.push(0.5, 0.5);
+    for (let i = 0; i < segments; i++) {
+      const a = i * stride + j;
+      const b = (i + 1) * stride + j;
+      if (up) indices.push(centre, a, b);
+      else indices.push(centre, b, a);
+    }
+  };
+  if (profile[0][0] > 1e-5) capAt(0, false);
+  if (profile[profile.length - 1][0] > 1e-5) capAt(profile.length - 1, true);
+
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
+  geo.setAttribute('normal', new BufferAttribute(new Float32Array(normals), 3));
+  geo.setAttribute('uv', new BufferAttribute(new Float32Array(uvs), 2));
+  geo.setIndex(indices);
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+const wheelCache = new Map<number, BufferGeometry>();
+/**
+ * A monobloc railway wheel of unit diameter, centred on its axle, with the
+ * axle running along X.
+ *
+ * `inboard` is the direction the flange faces: -1 for a wheel on the +X rail,
+ * +1 for one on the -X rail. The flange is what keeps a train on the road and
+ * the one detail that makes a bogie read as a bogie rather than as a trolley,
+ * so it is turned in rather than approximated by a disc - and it has to be on
+ * the correct side of each wheel or the wheelset looks inside out.
+ */
+export function railWheel(inboard: 1 | -1): BufferGeometry {
+  let geo = wheelCache.get(inboard);
+  if (geo) return geo;
+  // (radius, offset along the axle), as fractions of the wheel diameter, with
+  // the flange towards -axial.
+  const section: [number, number][] = [
+    [0.11, -0.075],
+    [0.30, -0.078],
+    [0.455, -0.070], // web
+    [0.520, -0.062], // flange root
+    [0.562, -0.040], // flange tip
+    [0.512, -0.022],
+    [0.500, 0.010], // tread, coned 1:20 as a real one is
+    [0.492, 0.070], // outer rim
+    [0.30, 0.072],
+    [0.11, 0.075],
+  ];
+  const oriented: [number, number][] =
+    inboard < 0 ? section.map(([r, a]) => [r, -a] as [number, number]).reverse() : section;
+  geo = revolved(oriented, 16);
+  // Turned so the axle runs along X.
+  geo.rotateZ(Math.PI / 2);
+  wheelCache.set(inboard, geo);
+  return geo;
+}
+
 const cardCache = new Map<number, BufferGeometry>();
 /** `count` vertical quads crossing through the origin, for foliage and grass. */
 export function crossCards(count = 3): BufferGeometry {
@@ -406,12 +510,84 @@ export function allFacadeMaterials(): MeshStandardMaterial[] {
   return [0, 1, 2, 3, 4].map((v) => facadeMaterial(v));
 }
 
+/**
+ * Structural steel: masts, gantries, columns, fences, handrails.
+ *
+ * Almost none of the steel beside a railway is bare - it is galvanised or
+ * painted, which is a fairly rough, only slightly metallic surface. Rendered
+ * as a polished metal with nothing but sky to reflect it turns black, which is
+ * what used to make every signal post and canopy column read as a silhouette.
+ */
 export function metalMaterial(): MeshStandardMaterial {
   return cached('metal', () =>
     new MeshStandardMaterial({
       map: textures.steel(),
-      roughness: 0.55,
-      metalness: 0.7,
+      roughness: 0.6,
+      metalness: 0.35,
+      vertexColors: true,
+      envMapIntensity: 0.8,
+    }),
+  );
+}
+
+/** Corrugated sheet: canopy roofs, warehouse cladding, lock-ups. */
+export function corrugatedMaterial(): MeshStandardMaterial {
+  return cached('corrugated', () =>
+    new MeshStandardMaterial({
+      map: textures.corrugated(),
+      // Painted or coated sheet, not a mirror: at 0.45 metalness a canopy roof
+      // reflects the whole sky and reads as a dark blue slab from underneath.
+      roughness: 0.72,
+      metalness: 0.18,
+      vertexColors: true,
+      envMapIntensity: 0.8,
+    }),
+  );
+}
+
+/** Diagonal yellow-and-black warning stripes: barriers, poles, buffer stops. */
+export function hazardMaterial(): MeshStandardMaterial {
+  return cached('hazard', () =>
+    new MeshStandardMaterial({
+      map: textures.hazardStripe(),
+      roughness: 0.6,
+      metalness: 0.05,
+      vertexColors: true,
+    }),
+  );
+}
+
+/** Platform deck paving. */
+export function platformMaterial(): MeshStandardMaterial {
+  return cached('platformDeck', () =>
+    new MeshStandardMaterial({
+      map: textures.platform(),
+      roughness: 0.88,
+      metalness: 0,
+      vertexColors: true,
+    }),
+  );
+}
+
+/** The dotted warning strip along a platform edge. */
+export function tactileMaterial(): MeshStandardMaterial {
+  return cached('tactile', () =>
+    new MeshStandardMaterial({
+      map: textures.tactile(),
+      roughness: 0.78,
+      metalness: 0,
+      vertexColors: true,
+    }),
+  );
+}
+
+/** Road deck through a level crossing. */
+export function crossingDeckMaterial(): MeshStandardMaterial {
+  return cached('crossingDeck', () =>
+    new MeshStandardMaterial({
+      map: textures.crossingDeck(),
+      roughness: 0.8,
+      metalness: 0.05,
       vertexColors: true,
     }),
   );
